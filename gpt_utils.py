@@ -2,9 +2,10 @@
 import openai
 import os
 from dotenv import load_dotenv
+from openai import AsyncOpenAI
 
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 async def get_prospect_prompt(fit_strictness, objection_focus, toughness_level, call_type, tone, business_pdf_text):
     prompt = f"""
