@@ -6,7 +6,7 @@ from livekit.agents.voice_assistant import VoiceAssistant
 from livekit.plugins import openai, silero
 from api import AssistantFnc
 
-from utils import extract_pdf_text
+from pdf_utils import extract_pdf_text
 from gpt_utils import get_prospect_prompt
 
 load_dotenv()
