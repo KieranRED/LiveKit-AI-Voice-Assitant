@@ -12,18 +12,19 @@ from gpt_utils import get_prospect_prompt
 load_dotenv()
 
 async def entrypoint(ctx: JobContext):
-    # 🔹 1. Load and parse your business sales PDF
-    pdf_path = "assets/sales.pdf"  # Adjust this path
+    print("🚀 Starting entrypoint...")
+
+    pdf_path = "assets/sales.pdf"
+    print(f"📄 Extracting PDF: {pdf_path}")
     business_pdf_text = extract_pdf_text(pdf_path)
 
-    # 🔹 2. Define persona simulation inputs
     fit_strictness = "strict"
     objection_focus = "trust"
     toughness_level = 5
     call_type = "discovery"
     tone = "direct"
 
-    # 🔹 3. Generate a custom prospect profile from GPT
+    print("💬 Getting prospect prompt from GPT...")
     prospect_prompt = await get_prospect_prompt(
         fit_strictness,
         objection_focus,
@@ -33,34 +34,51 @@ async def entrypoint(ctx: JobContext):
         business_pdf_text,
     )
 
-    print("\n🧠 Prospect Simulation Prompt:\n")
+    print("\n🧠 GPT Persona Prompt:\n")
     print(prospect_prompt)
-    print("\n" + "="*80 + "\n")
+    print("\n" + "="*60 + "\n")
 
-
-    # 🔹 4. Create system prompt for LLM
+    print("🧠 Building chat context...")
     initial_ctx = llm.ChatContext().append(
         role="system",
         text=prospect_prompt,
     )
 
-    # 🔹 5. Connect to LiveKit and launch assistant
+    print("📡 Connecting to LiveKit room...")
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+    print("✅ Connected to room.")
+
+    print("🔧 Setting up assistant...")
     fnc_ctx = AssistantFnc()
 
-    assistant = VoiceAssistant(
-        vad=silero.VAD.load(),
-        stt=openai.STT(),
-        llm=openai.LLM(),
-        tts=openai.TTS(),
-        chat_ctx=initial_ctx,
-        fnc_ctx=fnc_ctx,
-    )
+    try:
+        assistant = VoiceAssistant(
+            vad=silero.VAD.load(),
+            stt=openai.STT(),
+            llm=openai.LLM(),
+            tts=openai.TTS(),
+            chat_ctx=initial_ctx,
+            fnc_ctx=fnc_ctx,
+        )
+        print("✅ Assistant object created.")
+    except Exception as e:
+        print("❌ Error setting up assistant:", e)
+        return
 
-    assistant.start(ctx.room)
+    try:
+        assistant.start(ctx.room)
+        print("✅ Assistant started.")
+    except Exception as e:
+        print("❌ Error starting assistant:", e)
+        return
 
-    await asyncio.sleep(1)
-    await assistant.say("Hey, how can I help you today!", allow_interruptions=True)
+    try:
+        await asyncio.sleep(1)
+        await assistant.say("Hey, how can I help you today!", allow_interruptions=True)
+        print("🗣️ Assistant spoke the welcome message.")
+    except Exception as e:
+        print("❌ Error during welcome message:", e)
+
 
 
 if __name__ == "__main__":
