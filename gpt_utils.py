@@ -58,7 +58,7 @@ Include 2–3 short sample responses to common sales questions:
 Act as this prospect through a full call. Stick to the tone, objection, and difficulty level. Never break character.
 """
 
-    response = await openai.ChatCompletion.acreate(
+    response = await client.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "system", "content": prompt}],
     )
