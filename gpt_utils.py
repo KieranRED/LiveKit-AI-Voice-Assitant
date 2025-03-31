@@ -64,4 +64,4 @@ Act as this prospect through a full call. Stick to the tone, objection, and diff
         messages=[{"role": "system", "content": prompt}],
     )
 
-    return response['choices'][0]['message']['content']
+    return response.choices[0].message.content
