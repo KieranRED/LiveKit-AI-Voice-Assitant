@@ -38,6 +38,7 @@ async def entrypoint(ctx: JobContext):
     print(prospect_prompt)
     print("\n" + "="*60 + "\n")
 
+
     print("🧠 Building chat context...")
     initial_ctx = llm.ChatContext().append(
         role="system",
@@ -45,7 +46,13 @@ async def entrypoint(ctx: JobContext):
     )
 
     print("📡 Connecting to LiveKit room...")
+    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NDM1ODIwODUsImlzcyI6IkFQSUFCN1dScGpQUnVQMyIsIm5hbWUiOiJ0ZXN0LXVzZXIiLCJuYmYiOjE3NDM1ODE3ODUsInN1YiI6InRlc3QtdXNlciIsInZpZGVvIjp7InJvb20iOiJDbG9zZXJTaW11bGF0b3IiLCJyb29tSm9pbiI6dHJ1ZX19.X8kggwdMBGhZZVv3VYLIBkBsmHpG_JUZD_MAIiUVXV8"
+    room_name = "CloserSimulator"
+
+    print(f"📡 Connecting to LiveKit room '{room_name}' with token...")
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+
+
     print("✅ Connected to room.")
 
     print("🔧 Setting up assistant...")
@@ -56,7 +63,7 @@ async def entrypoint(ctx: JobContext):
             vad=silero.VAD.load(),
             stt=openai.STT(),
             llm=openai.LLM(),
-            tts=openai.TTS(),
+            tts=openai.TTS(instructions=prospect_prompt),
             chat_ctx=initial_ctx,
             fnc_ctx=fnc_ctx,
         )
@@ -74,7 +81,7 @@ async def entrypoint(ctx: JobContext):
 
     try:
         await asyncio.sleep(1)
-        await assistant.say("Hey, how can I help you today!", allow_interruptions=True)
+        await assistant.say("Hey", allow_interruptions=True)
         print("🗣️ Assistant spoke the welcome message.")
     except Exception as e:
         print("❌ Error during welcome message:", e)
