@@ -1,0 +1,22 @@
+# fly.toml app configuration file generated for livekit-ai-voice-assitant-silent-cherry-2581 on 2025-05-31T23:02:26+02:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'livekit-ai-voice-assitant-silent-cherry-2581'
+primary_region = 'sea'
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
