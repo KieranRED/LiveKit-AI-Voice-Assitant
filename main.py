@@ -1,5 +1,7 @@
 # main.py
 import asyncio
+import os
+import requests
 from dotenv import load_dotenv
 from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, llm
 from livekit.agents.voice_assistant import VoiceAssistant
@@ -11,8 +13,33 @@ from gpt_utils import get_prospect_prompt
 
 load_dotenv()
 
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE")  # Use service role or env-safe key
+
+
+def fetch_token_from_supabase(session_id):
+    url = f"{SUPABASE_URL}/rest/v1/livekit_tokens?id=eq.{session_id}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Accept": "application/json"
+    }
+
+    res = requests.get(url, headers=headers)
+    res.raise_for_status()
+    data = res.json()
+    if not data:
+        raise ValueError("❌ Token not found for session_id")
+
+    return data[0]['token'], data[0]['room'], data[0]['identity']
+
+
 async def entrypoint(ctx: JobContext):
     print("🚀 Starting entrypoint...")
+
+    session_id = os.getenv("SESSION_ID")  # Must be passed into environment or injected
+    print(f"🔍 Using session ID: {session_id}")
+    token, room_name, identity = fetch_token_from_supabase(session_id)
 
     pdf_path = "assets/sales.pdf"
     print(f"📄 Extracting PDF: {pdf_path}")
@@ -38,20 +65,14 @@ async def entrypoint(ctx: JobContext):
     print(prospect_prompt)
     print("\n" + "="*60 + "\n")
 
-
     print("🧠 Building chat context...")
     initial_ctx = llm.ChatContext().append(
         role="system",
         text=prospect_prompt,
     )
 
-    print("📡 Connecting to LiveKit room...")
-    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NDM1ODIwODUsImlzcyI6IkFQSUFCN1dScGpQUnVQMyIsIm5hbWUiOiJ0ZXN0LXVzZXIiLCJuYmYiOjE3NDM1ODE3ODUsInN1YiI6InRlc3QtdXNlciIsInZpZGVvIjp7InJvb20iOiJDbG9zZXJTaW11bGF0b3IiLCJyb29tSm9pbiI6dHJ1ZX19.X8kggwdMBGhZZVv3VYLIBkBsmHpG_JUZD_MAIiUVXV8"
-    room_name = "CloserSimulator"
-
     print(f"📡 Connecting to LiveKit room '{room_name}' with token...")
-    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
-
+    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY, token=token)
 
     print("✅ Connected to room.")
 
@@ -63,7 +84,7 @@ async def entrypoint(ctx: JobContext):
             vad=silero.VAD.load(),
             stt=openai.STT(),
             llm=openai.LLM(),
-            tts=openai.TTS(instructions=prospect_prompt),
+            tts=openai.TTS(instructions=prospect_prompt.strip()),
             chat_ctx=initial_ctx,
             fnc_ctx=fnc_ctx,
         )
@@ -85,7 +106,6 @@ async def entrypoint(ctx: JobContext):
         print("🗣️ Assistant spoke the welcome message.")
     except Exception as e:
         print("❌ Error during welcome message:", e)
-
 
 
 if __name__ == "__main__":

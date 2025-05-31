@@ -60,7 +60,7 @@ Act as this prospect through a full call. Stick to the tone, objection, and diff
 """
 
     response = await client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4.1-nano",
         messages=[{"role": "system", "content": prompt}],
     )
 
