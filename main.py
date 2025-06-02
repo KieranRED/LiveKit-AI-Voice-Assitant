@@ -90,10 +90,20 @@ async def entrypoint(ctx: JobContext):
     
     try:
         assistant = VoiceAssistant(
-            vad=silero.VAD.load(),
-            stt=openai.STT(),
-            llm=openai.LLM(),
-            tts=openai.TTS(instructions=prospect_prompt.strip()),
+            vad=silero.VAD.load(
+                min_silence_duration=0.2,  # Faster response to silence
+                min_speaking_duration=0.1,  # Start listening sooner
+            ),
+            stt=openai.STT.load(
+                model="whisper-1",
+            ),
+            llm=openai.LLM.load(
+                temperature=0.8,
+                max_tokens=512,
+            ),
+            tts=openai.TTS.load(
+                voice="nova",  # Fast, natural voice
+            ),
             chat_ctx=initial_ctx,
             fnc_ctx=fnc_ctx,
         )
