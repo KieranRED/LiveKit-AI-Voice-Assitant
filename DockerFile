@@ -15,4 +15,4 @@ COPY . .
 ENV PYTHONUNBUFFERED=1
 
 # Run the LiveKit agent
-CMD ["python", "main.py"]
+CMD ["python", "main.py", "start"]
