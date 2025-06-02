@@ -15,6 +15,13 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE") # Use service role or env-safe key
 
+# 🆕 DEBUG: Log what environment variables we actually have
+print("🔍 DEBUG - Environment variables in Fly machine:")
+print(f"SUPABASE_URL: {'✅ Set' if SUPABASE_URL else '❌ Missing'} - {SUPABASE_URL}")
+print(f"SUPABASE_SERVICE_ROLE: {'✅ Set' if SUPABASE_KEY else '❌ Missing'} - {SUPABASE_KEY[:20] if SUPABASE_KEY else 'None'}...")
+print(f"SESSION_ID: {'✅ Set' if os.getenv('SESSION_ID') else '❌ Missing'}")
+print(f"OPENAI_API_KEY: {'✅ Set' if os.getenv('OPENAI_API_KEY') else '❌ Missing'}")
+
 def fetch_token_from_supabase(session_id):
     url = f"{SUPABASE_URL}/rest/v1/livekit_tokens?id=eq.{session_id}"
     headers = {
@@ -22,7 +29,15 @@ def fetch_token_from_supabase(session_id):
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Accept": "application/json"
     }
+    
+    # 🆕 DEBUG: Log the request details
+    print(f"🔍 DEBUG - Making request to: {url}")
+    print(f"🔍 DEBUG - Headers: apikey={SUPABASE_KEY[:20] if SUPABASE_KEY else 'None'}...")
+    
     res = requests.get(url, headers=headers)
+    print(f"🔍 DEBUG - Response status: {res.status_code}")
+    print(f"🔍 DEBUG - Response text: {res.text[:200]}...")
+    
     res.raise_for_status()
     data = res.json()
     if not data:
