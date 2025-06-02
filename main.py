@@ -94,10 +94,7 @@ async def entrypoint(ctx: JobContext):
             stt=openai.STT(
                 model="whisper-1",
             ),
-            llm=openai.LLM(
-                temperature=0.8,
-                max_tokens=512,
-            ),
+            llm=openai.LLM(),
             tts=openai.TTS(
                 voice="nova",  # Fast, natural voice
             ),
