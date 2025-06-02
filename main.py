@@ -82,7 +82,7 @@ async def entrypoint(ctx: JobContext):
     )
     
     print(f"📡 Connecting to LiveKit room '{room_name}' with token...")
-    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY, token=token)
+    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     print("✅ Connected to room.")
     
     print("🔧 Setting up assistant...")
