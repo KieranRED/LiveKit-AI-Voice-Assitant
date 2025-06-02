@@ -94,8 +94,6 @@ async def entrypoint(ctx: JobContext):
             stt=openai.STT(),
             llm=openai.LLM(    
                 temperature=0.8,
-                frequency_penalty=0.5,
-                presence_penalty=0.3,
                 stream=True, ),
             tts=openai.TTS(instructions=prospect_prompt.strip()),
             chat_ctx=initial_ctx,
