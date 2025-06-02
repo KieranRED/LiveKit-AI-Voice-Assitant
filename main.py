@@ -23,7 +23,7 @@ print(f"SESSION_ID: {'✅ Set' if os.getenv('SESSION_ID') else '❌ Missing'}")
 print(f"OPENAI_API_KEY: {'✅ Set' if os.getenv('OPENAI_API_KEY') else '❌ Missing'}")
 
 def fetch_token_from_supabase(session_id):
-    url = f"{SUPABASE_URL}/rest/v1/livekit_tokens?id=eq.{session_id}"
+    url = f"{SUPABASE_URL}/rest/v1/livekit_tokens?token=eq.{session_id}"
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
