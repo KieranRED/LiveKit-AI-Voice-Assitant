@@ -92,7 +92,11 @@ async def entrypoint(ctx: JobContext):
         assistant = VoiceAssistant(
             vad=silero.VAD.load(),
             stt=openai.STT(),
-            llm=openai.LLM(),
+            llm=openai.LLM(    
+                temperature=0.8,
+                frequency_penalty=0.5,
+                presence_penalty=0.3,
+                stream=True, ),
             tts=openai.TTS(instructions=prospect_prompt.strip()),
             chat_ctx=initial_ctx,
             fnc_ctx=fnc_ctx,
