@@ -101,7 +101,6 @@ async def entrypoint(ctx: JobContext):
                 temperature=0.8,
                 max_tokens=512,
                 # 🆕 Enable streaming for faster response
-                stream=True,
             ),
             # 🔥 ElevenLabs TTS with streaming for instant response
             tts=elevenlabs.TTS(
