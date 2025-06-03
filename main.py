@@ -5,7 +5,7 @@ import requests
 from dotenv import load_dotenv
 from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, llm
 from livekit.agents.voice_assistant import VoiceAssistant
-from livekit.plugins import openai, silero
+from livekit.plugins import openai, silero, elevenlabs  # 🆕 Added elevenlabs
 from api import AssistantFnc
 from pdf_utils import extract_pdf_text
 from gpt_utils import get_prospect_prompt
@@ -21,6 +21,7 @@ print(f"SUPABASE_URL: {'✅ Set' if SUPABASE_URL else '❌ Missing'} - {SUPABASE
 print(f"SUPABASE_SERVICE_ROLE: {'✅ Set' if SUPABASE_KEY else '❌ Missing'} - {SUPABASE_KEY[:20] if SUPABASE_KEY else 'None'}...")
 print(f"SESSION_ID: {'✅ Set' if os.getenv('SESSION_ID') else '❌ Missing'}")
 print(f"OPENAI_API_KEY: {'✅ Set' if os.getenv('OPENAI_API_KEY') else '❌ Missing'}")
+print(f"ELEVENLABS_API_KEY: {'✅ Set' if os.getenv('ELEVENLABS_API_KEY') else '❌ Missing'}")  # 🆕 Added
 
 def fetch_token_from_supabase(session_id):
     url = f"{SUPABASE_URL}/rest/v1/livekit_tokens?token=eq.{session_id}"
@@ -85,19 +86,47 @@ async def entrypoint(ctx: JobContext):
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     print("✅ Connected to room.")
     
-    print("🔧 Setting up assistant...")
+    print("🔧 Setting up assistant with ElevenLabs streaming...")
     fnc_ctx = AssistantFnc()
     
     try:
         assistant = VoiceAssistant(
-            vad=silero.VAD.load(),
-            stt=openai.STT(),
-            llm=openai.LLM(),
-            tts=openai.TTS(),
+            vad=silero.VAD.load(
+                # 🆕 Optimize VAD for faster response
+                min_silence_duration=0.3,  # Shorter silence detection
+                min_speaking_duration=0.1,  # Faster voice detection
+            ),
+            stt=openai.STT(
+                model="whisper-1",  # 🆕 Specify model for consistency
+                language="en",  # 🆕 Optimize for English
+            ),
+            llm=openai.LLM(
+                model="gpt-4.1-nano",  # 🆕 Specify model
+                temperature=0.8,
+                max_tokens=512,
+                # 🆕 Enable streaming for faster response
+                stream=True,
+            ),
+            # 🔥 ElevenLabs TTS with streaming for instant response
+            tts=elevenlabs.TTS(
+                voice_id="pNInz6obpgDQGcFmaJgB",  # Adam - clear male voice
+                # Alternative voices you can try:
+                # "21m00Tcm4TlvDq8ikWAM",  # Rachel - clear female
+                # "AZnzlk1XvdvUeBnXmlld",  # Domi - confident female
+                
+                model_id="eleven_turbo_v2",  # 🚀 Fastest model for minimal latency
+                streaming=True,  # 🔥 Enable streaming for instant speech
+                
+                # Optional: Fine-tune voice settings
+                stability=0.7,
+                similarity_boost=0.8,
+                style=0.2,
+                use_speaker_boost=True,
+            ),
             chat_ctx=initial_ctx,
             fnc_ctx=fnc_ctx,
         )
-        print("✅ Assistant object created.")
+        print("✅ Assistant object created with ElevenLabs streaming TTS.")
         
         # 🆕 ADD EVENT LISTENERS FOR LOGGING
         @assistant.on("user_speech_committed")
@@ -126,21 +155,27 @@ async def entrypoint(ctx: JobContext):
             
     except Exception as e:
         print("❌ Error setting up assistant:", e)
+        import traceback
+        traceback.print_exc()
         return
     
     try:
         assistant.start(ctx.room)
-        print("✅ Assistant started.")
+        print("✅ Assistant started with ElevenLabs streaming.")
     except Exception as e:
         print("❌ Error starting assistant:", e)
+        import traceback
+        traceback.print_exc()
         return
     
     try:
         await asyncio.sleep(1)
-        await assistant.say("Hey there! I'm ready to chat. Can you hear me?", allow_interruptions=True)
-        print("🗣️ Assistant spoke the welcome message.")
+        await assistant.say("Hey there! I'm ready to chat. Can you hear me clearly?", allow_interruptions=True)
+        print("🗣️ Assistant spoke the welcome message with ElevenLabs.")
     except Exception as e:
         print("❌ Error during welcome message:", e)
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
