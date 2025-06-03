@@ -21,7 +21,7 @@ print(f"SUPABASE_URL: {'✅ Set' if SUPABASE_URL else '❌ Missing'} - {SUPABASE
 print(f"SUPABASE_SERVICE_ROLE: {'✅ Set' if SUPABASE_KEY else '❌ Missing'} - {SUPABASE_KEY[:20] if SUPABASE_KEY else 'None'}...")
 print(f"SESSION_ID: {'✅ Set' if os.getenv('SESSION_ID') else '❌ Missing'}")
 print(f"OPENAI_API_KEY: {'✅ Set' if os.getenv('OPENAI_API_KEY') else '❌ Missing'}")
-print(f"ELEVENLABS_API_KEY: {'✅ Set' if os.getenv('ELEVENLABS_API_KEY') else '❌ Missing'}")  # 🆕 Added
+print(f"ELEVEN_API_KEY: {'✅ Set' if os.getenv('ELEVEN_API_KEY') else '❌ Missing'}")  # 🆕 Updated variable name
 
 def fetch_token_from_supabase(session_id):
     url = f"{SUPABASE_URL}/rest/v1/livekit_tokens?token=eq.{session_id}"
@@ -91,16 +91,19 @@ async def entrypoint(ctx: JobContext):
     
     try:
         assistant = VoiceAssistant(
-            vad=silero.VAD.load(),  # Use default settings
+            vad=silero.VAD.load(),  # 🆕 Use default VAD settings
             stt=openai.STT(
-                model="whisper-1",
-                language="en",
+                model="whisper-1",  # 🆕 Specify model for consistency
+                language="en",  # 🆕 Optimize for English
             ),
             llm=openai.LLM(
-                model="gpt-4.1-nano",
+                model="gpt-4",  # 🆕 Specify model
                 temperature=0.8,
                 max_tokens=512,
+                # 🆕 Enable streaming for faster response
+                stream=True,
             ),
+            # 🔥 ElevenLabs TTS with streaming for instant response
             tts=elevenlabs.TTS(
                 voice=elevenlabs.Voice(
                     id="EXAVITQu4vr4xnSDxMaL",  # Bella voice ID (default)
@@ -118,17 +121,17 @@ async def entrypoint(ctx: JobContext):
             ),
             chat_ctx=initial_ctx,
             fnc_ctx=fnc_ctx,
-    )
+        )
         print("✅ Assistant object created with ElevenLabs streaming TTS.")
         
         # 🆕 ADD EVENT LISTENERS FOR LOGGING
         @assistant.on("user_speech_committed")
-        def on_user_speech(audio_event):
-            print(f"🎤 USER SAID: {audio_event.alternatives[0].text}")
+        def on_user_speech(msg):  # 🆕 Changed parameter name
+            print(f"🎤 USER SAID: {msg.content}")  # 🆕 Use msg.content instead
             
         @assistant.on("agent_speech_committed") 
-        def on_agent_speech(audio_event):
-            print(f"🤖 BOT SAID: {audio_event.text}")
+        def on_agent_speech(msg):  # 🆕 Changed parameter name
+            print(f"🤖 BOT SAID: {msg.content}")  # 🆕 Use msg.content instead
             
         @assistant.on("user_started_speaking")
         def on_user_start():
