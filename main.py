@@ -102,13 +102,8 @@ async def entrypoint(ctx: JobContext):
                 max_tokens=512,
             ),
             tts=elevenlabs.TTS(
-                voice_id="pNInz6obpgDQGcFmaJgB",  # Adam voice
-                model_id="eleven_turbo_v2",
-                streaming=True,
-                stability=0.7,
-                similarity_boost=0.8,
-                style=0.2,
-                use_speaker_boost=True,
+                voice="adam",  # Use voice name instead of voice_id
+                model="eleven_turbo_v2",  # Use model instead of model_id
             ),
             chat_ctx=initial_ctx,
             fnc_ctx=fnc_ctx,
