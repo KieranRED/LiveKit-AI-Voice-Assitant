@@ -91,33 +91,21 @@ async def entrypoint(ctx: JobContext):
     
     try:
         assistant = VoiceAssistant(
-            vad=silero.VAD.load(
-                # 🆕 Optimize VAD for faster response
-                min_silence_duration=0.3,  # Shorter silence detection
-                min_speaking_duration=0.1,  # Faster voice detection
-            ),
+            vad=silero.VAD.load(),  # Use default settings
             stt=openai.STT(
-                model="whisper-1",  # 🆕 Specify model for consistency
-                language="en",  # 🆕 Optimize for English
+                model="whisper-1",
+                language="en",
             ),
             llm=openai.LLM(
-                model="gpt-4.1-nano",  # 🆕 Specify model
+                model="gpt-4.1-nano",
                 temperature=0.8,
                 max_tokens=512,
-                # 🆕 Enable streaming for faster response
                 stream=True,
             ),
-            # 🔥 ElevenLabs TTS with streaming for instant response
             tts=elevenlabs.TTS(
-                voice_id="pNInz6obpgDQGcFmaJgB",  # Adam - clear male voice
-                # Alternative voices you can try:
-                # "21m00Tcm4TlvDq8ikWAM",  # Rachel - clear female
-                # "AZnzlk1XvdvUeBnXmlld",  # Domi - confident female
-                
-                model_id="eleven_turbo_v2",  # 🚀 Fastest model for minimal latency
-                streaming=True,  # 🔥 Enable streaming for instant speech
-                
-                # Optional: Fine-tune voice settings
+                voice_id="pNInz6obpgDQGcFmaJgB",  # Adam voice
+                model_id="eleven_turbo_v2",
+                streaming=True,
                 stability=0.7,
                 similarity_boost=0.8,
                 style=0.2,
@@ -125,7 +113,7 @@ async def entrypoint(ctx: JobContext):
             ),
             chat_ctx=initial_ctx,
             fnc_ctx=fnc_ctx,
-        )
+    )
         print("✅ Assistant object created with ElevenLabs streaming TTS.")
         
         # 🆕 ADD EVENT LISTENERS FOR LOGGING
