@@ -100,7 +100,6 @@ async def entrypoint(ctx: JobContext):
                 model="gpt-4.1-nano",
                 temperature=0.8,
                 max_tokens=512,
-                stream=True,
             ),
             tts=elevenlabs.TTS(
                 voice_id="pNInz6obpgDQGcFmaJgB",  # Adam voice
