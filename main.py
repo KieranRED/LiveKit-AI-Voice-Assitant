@@ -92,10 +92,10 @@ async def entrypoint(ctx: JobContext):
     try:
         assistant = VoiceAssistant(
             vad=silero.VAD.load(
-                min_speech_duration=0.1,        # Keep this
-                min_silence_duration=0.7,       # Reduce from 1.0 to 0.7 seconds
-                prefix_padding_duration=0.3,    # Keep this
-                activation_threshold=0.5,       # Keep this
+                min_speech_duration=0.08,       # Slightly lower to be more responsive
+                min_silence_duration=0.4,       # Much shorter - more natural conversation pace
+                prefix_padding_duration=0.2,    # Reduced padding for faster response
+                activation_threshold=0.5,       # Keep default
             ),
             stt=openai.STT(
                 model="whisper-1",
