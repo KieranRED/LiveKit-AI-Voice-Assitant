@@ -5,7 +5,7 @@ import requests
 from dotenv import load_dotenv
 from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, llm
 from livekit.agents.voice_assistant import VoiceAssistant
-from livekit.plugins import openai, silero, elevenlabs
+from livekit.plugins import openai, silero  # 🆕 Removed elevenlabs import
 from api import AssistantFnc
 from pdf_utils import extract_pdf_text
 from gpt_utils import get_prospect_prompt
@@ -13,15 +13,15 @@ from gpt_utils import get_prospect_prompt
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE") # Use service role or env-safe key
 
-# DEBUG: Log environment variables
+# 🆕 DEBUG: Log what environment variables we actually have
 print("🔍 DEBUG - Environment variables in Fly machine:")
 print(f"SUPABASE_URL: {'✅ Set' if SUPABASE_URL else '❌ Missing'} - {SUPABASE_URL}")
 print(f"SUPABASE_SERVICE_ROLE: {'✅ Set' if SUPABASE_KEY else '❌ Missing'} - {SUPABASE_KEY[:20] if SUPABASE_KEY else 'None'}...")
 print(f"SESSION_ID: {'✅ Set' if os.getenv('SESSION_ID') else '❌ Missing'}")
 print(f"OPENAI_API_KEY: {'✅ Set' if os.getenv('OPENAI_API_KEY') else '❌ Missing'}")
-print(f"ELEVEN_API_KEY: {'✅ Set' if os.getenv('ELEVEN_API_KEY') else '❌ Missing'}")
+print(f"ELEVEN_API_KEY: {'✅ Set' if os.getenv('ELEVEN_API_KEY') else '❌ Missing'}")  # Keep this for debugging
 
 def fetch_token_from_supabase(session_id):
     url = f"{SUPABASE_URL}/rest/v1/livekit_tokens?token=eq.{session_id}"
@@ -31,6 +31,7 @@ def fetch_token_from_supabase(session_id):
         "Accept": "application/json"
     }
     
+    # 🆕 DEBUG: Log the request details
     print(f"🔍 DEBUG - Making request to: {url}")
     print(f"🔍 DEBUG - Headers: apikey={SUPABASE_KEY[:20] if SUPABASE_KEY else 'None'}...")
     
@@ -46,7 +47,7 @@ def fetch_token_from_supabase(session_id):
 
 async def entrypoint(ctx: JobContext):
     print("🚀 Starting entrypoint...")
-    session_id = os.getenv("SESSION_ID")
+    session_id = os.getenv("SESSION_ID") # Must be passed into environment or injected
     print(f"🔍 Using session ID: {session_id}")
     
     token, room_name, identity = fetch_token_from_supabase(session_id)
@@ -85,68 +86,48 @@ async def entrypoint(ctx: JobContext):
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     print("✅ Connected to room.")
     
-    print("🔧 Setting up assistant with optimized settings...")
+    print("🔧 Setting up assistant with improved VAD settings...")
     fnc_ctx = AssistantFnc()
     
     try:
         assistant = VoiceAssistant(
-            # 🆕 BALANCED VAD SETTINGS - Less jerky but still responsive
+            # 🆕 SLIGHTLY IMPROVED VAD - minimal changes from your original
             vad=silero.VAD.load(
-                min_speech_duration=0.15,       # Slightly higher than your original 0.08
-                min_silence_duration=0.6,       # Between your 0.4 and my 0.8
-                prefix_padding_duration=0.15,   # Slightly less than your 0.2
-                activation_threshold=0.55,      # Slightly higher than default 0.5
+                min_speech_duration=0.1,        # Between your 0.08 and my 0.15
+                min_silence_duration=0.5,       # Between your 0.4 and 0.8
+                prefix_padding_duration=0.2,    # Keep your original
+                activation_threshold=0.5,       # Keep default
             ),
-            
-            # 🆕 OPTIMIZED STT
             stt=openai.STT(
                 model="whisper-1",
                 language="en",
             ),
-            
-            # 🆕 OPTIMIZED LLM SETTINGS
             llm=openai.LLM(
-                model="gpt-4.1-nano",    # Keep your faster model
-                temperature=0.8,         # Keep your original setting
-                max_tokens=512,          # Keep original for full responses
+                model="gpt-4.1-nano",    # Keep your preferred model
+                temperature=0.8,         # Keep your original
+                max_tokens=512,          # Keep your original
             ),
-            
-            # 🆕 KEEP OPENAI TTS as preferred
             tts=openai.TTS(
-                voice="nova",
+                voice="nova",  # Keep your preference
                 model="tts-1",
+                instructions="",
             ),
-            
             chat_ctx=initial_ctx,
-            
-            # 🆕 ONLY USE ACTUAL LIVEKIT FEATURES
-            preemptive_synthesis=True,         # This exists and helps
-            
+            preemptive_synthesis=True,
             fnc_ctx=fnc_ctx,
         )
-        print("✅ Assistant object created with optimized settings.")
+        print("✅ Assistant object created.")
         
-        # 🆕 IMPROVED EVENT LISTENERS with debouncing and speech buffer
-        last_user_speech_time = 0
-        last_agent_speech_time = 0
-        speech_buffer_time = 0.3  # Wait 300ms after speech stops before processing
+        # 🆕 SIMPLIFIED EVENT LISTENERS - closer to your original
+        speech_buffer_time = 0.3  # Our new addition
         
         @assistant.on("user_speech_committed")
         def on_user_speech(msg):
-            nonlocal last_user_speech_time
-            current_time = asyncio.get_event_loop().time()
-            # Debounce rapid fire events
-            if current_time - last_user_speech_time > 0.5:
-                print(f"🎤 USER SAID: {msg.content}")
-                last_user_speech_time = current_time
+            print(f"🎤 USER SAID: {msg.content}")
             
         @assistant.on("agent_speech_committed") 
         def on_agent_speech(msg):
-            nonlocal last_agent_speech_time
-            current_time = asyncio.get_event_loop().time()
-            if current_time - last_agent_speech_time > 0.5:
-                print(f"🤖 BOT SAID: {msg.content}")
-                last_agent_speech_time = current_time
+            print(f"🤖 BOT SAID: {msg.content}")
             
         @assistant.on("user_started_speaking")
         def on_user_start():
@@ -155,8 +136,6 @@ async def entrypoint(ctx: JobContext):
         @assistant.on("user_stopped_speaking")
         def on_user_stop():
             print("🎤 User stopped speaking.")
-            # Speech buffer: Allow 300ms for user to continue speaking
-            # This helps prevent cutting off natural pauses in speech
             
         @assistant.on("agent_started_speaking")
         def on_agent_start():
@@ -166,8 +145,6 @@ async def entrypoint(ctx: JobContext):
         def on_agent_stop(): 
             print("🤖 Bot stopped speaking.")
             
-        # Note: Only using verified LiveKit events above
-            
     except Exception as e:
         print("❌ Error setting up assistant:", e)
         import traceback
@@ -176,7 +153,7 @@ async def entrypoint(ctx: JobContext):
     
     try:
         assistant.start(ctx.room)
-        print("✅ Assistant started with optimized settings.")
+        print("✅ Assistant started.")
     except Exception as e:
         print("❌ Error starting assistant:", e)
         import traceback
@@ -184,9 +161,8 @@ async def entrypoint(ctx: JobContext):
         return
     
     try:
-        # 🆕 SHORTER WELCOME MESSAGE for faster start
-        await asyncio.sleep(0.5)  # Reduced wait time
-        await assistant.say("Hey! Can you hear me clearly?", allow_interruptions=True)
+        await asyncio.sleep(1)
+        await assistant.say("Hey there! I'm ready to chat. Can you hear me clearly?", allow_interruptions=True)
         print("🗣️ Assistant spoke the welcome message.")
     except Exception as e:
         print("❌ Error during welcome message:", e)
