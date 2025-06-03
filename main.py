@@ -101,7 +101,7 @@ async def entrypoint(ctx: JobContext):
                 temperature=0.8,
                 max_tokens=512,
             ),
-            tts=openai.TTS(),
+            tts=openai.TTS(instructions=""),
             chat_ctx=initial_ctx,
             preemptive_synthesis=True,
             # 🆕 ADD THESE LINES TO SMOOTH OUT INTERRUPTIONS:
@@ -131,7 +131,7 @@ async def entrypoint(ctx: JobContext):
             print("🤖 Bot started speaking...")
             
         @assistant.on("agent_stopped_speaking")
-        def on_agent_stop():
+        def on_agent_stop(): 
             print("🤖 Bot stopped speaking.")
             
     except Exception as e:
