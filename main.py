@@ -91,7 +91,11 @@ async def entrypoint(ctx: JobContext):
     
     try:
         assistant = VoiceAssistant(
-            vad=silero.VAD.load(),
+            vad=silero.VAD.load(
+                min_silence_duration=1.0,  # Wait 1 second of silence before considering speech ended
+                min_speech_duration=0.5,   # Need 0.5 seconds of speech to register as talking
+                speech_pad_ms=300,         # Add 300ms padding around detected speech
+            ),
             stt=openai.STT(
                 model="whisper-1",
                 language="en",
