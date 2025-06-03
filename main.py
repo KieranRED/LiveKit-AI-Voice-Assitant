@@ -101,7 +101,11 @@ async def entrypoint(ctx: JobContext):
                 temperature=0.8,
                 max_tokens=512,
             ),
-            tts=openai.TTS(instructions=""),
+            tts=openai.TTS(
+                voice="nova",  # Add this
+                model="tts-1",  # Add this
+                instructions="",  # Keep this
+            ),
             chat_ctx=initial_ctx,
             preemptive_synthesis=True,
             # 🆕 ADD THESE LINES TO SMOOTH OUT INTERRUPTIONS:
