@@ -97,7 +97,7 @@ async def entrypoint(ctx: JobContext):
                 language="en",  # 🆕 Optimize for English
             ),
             llm=openai.LLM(
-                model="gpt-4",  # 🆕 Specify model
+                model="gpt-4.1-nano",  # 🆕 Specify model
                 temperature=0.8,
                 max_tokens=512,
                 # 🆕 Enable streaming for faster response
@@ -120,6 +120,7 @@ async def entrypoint(ctx: JobContext):
                 streaming_latency=4,  # Maximum streaming optimization
             ),
             chat_ctx=initial_ctx,
+            preemptive_synthesis=True,
             fnc_ctx=fnc_ctx,
         )
         print("✅ Assistant object created with ElevenLabs streaming TTS.")
