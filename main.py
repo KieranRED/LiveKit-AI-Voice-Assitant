@@ -91,10 +91,7 @@ async def entrypoint(ctx: JobContext):
     
     try:
         assistant = VoiceAssistant(
-            vad=silero.VAD.load(
-                min_speech_duration=0.2,  # 🆕 Require 200ms of speech before triggering
-                min_silence_duration=0.6,  # 🆕 Wait 600ms of silence before processing
-            ),
+            vad=silero.VAD.load(),
             stt=openai.STT(
                 model="whisper-1",
                 language="en",
@@ -104,28 +101,10 @@ async def entrypoint(ctx: JobContext):
                 temperature=0.8,
                 max_tokens=512,
             ),
-            tts=elevenlabs.TTS(
-                voice=elevenlabs.Voice(
-                    id="EXAVITQu4vr4xnSDxMaL",
-                    name="Bella",
-                    category="premade",
-                    settings=elevenlabs.VoiceSettings(
-                        stability=0.71,
-                        similarity_boost=0.5,
-                        style=0.0,
-                        use_speaker_boost=True
-                    )
-                ),
-                model="eleven_turbo_v2_5",
-                streaming_latency=4,
-            ),
+            tts=openai.TTS(),
             chat_ctx=initial_ctx,
             preemptive_synthesis=True,
             # 🆕 ADD THESE LINES TO SMOOTH OUT INTERRUPTIONS:
-            allow_interruptions=True,
-            interrupt_speech_duration=0.8,  # Need 800ms of speech to interrupt
-            interrupt_min_words=2,  # Need at least 2 words to interrupt  
-            min_endpointing_delay=0.8,  # Wait 800ms before considering user finished
             fnc_ctx=fnc_ctx,
         )
         print("✅ Assistant object created with ElevenLabs streaming TTS.")
