@@ -102,8 +102,19 @@ async def entrypoint(ctx: JobContext):
                 max_tokens=512,
             ),
             tts=elevenlabs.TTS(
-                voice="adam",  # Use voice name instead of voice_id
-                model="eleven_turbo_v2",  # Use model instead of model_id
+                voice=elevenlabs.Voice(
+                    id="EXAVITQu4vr4xnSDxMaL",  # Bella voice ID (default)
+                    name="Bella",
+                    category="premade",
+                    settings=elevenlabs.VoiceSettings(
+                        stability=0.71,
+                        similarity_boost=0.5,
+                        style=0.0,
+                        use_speaker_boost=True
+                    )
+                ),
+                model="eleven_turbo_v2_5",
+                streaming_latency=4,  # Maximum streaming optimization
             ),
             chat_ctx=initial_ctx,
             fnc_ctx=fnc_ctx,
