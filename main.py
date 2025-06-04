@@ -108,7 +108,7 @@ async def entrypoint(ctx: JobContext):
             llm=openai.LLM(
                 model="gpt-4.1-nano",    # Use the faster, newer model
                 temperature=0.7,         # Slightly lower for faster generation
-                max_tokens=256,          # Shorter responses = faster processing
+                max_tokens=1000,          # Shorter responses = faster processing
             ),
             
             # 🆕 STREAMING TTS WITH ELEVENLABS - Much faster response
