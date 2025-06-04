@@ -90,12 +90,12 @@ async def entrypoint(ctx: JobContext):
     
     try:
         assistant = VoiceAssistant(
-            # 🆕 EXTREME VAD SETTINGS - Zero tolerance for delays
+            # 🆕 PATIENT VAD SETTINGS - Let user finish speaking
             vad=silero.VAD.load(
-                min_speech_duration=0.05,       # Even lower - instant detection
-                min_silence_duration=0.2,       # Extremely aggressive
-                prefix_padding_duration=0.02,   # Minimal padding
-                activation_threshold=0.3,       # Very low threshold
+                min_speech_duration=0.1,        # Stable detection
+                min_silence_duration=0.6,       # Wait longer before responding
+                prefix_padding_duration=0.1,    # Good padding
+                activation_threshold=0.6,       # Less sensitive to avoid false triggers
             ),
             
             # 🆕 OPTIMIZED STT
@@ -104,11 +104,11 @@ async def entrypoint(ctx: JobContext):
                 language="en",
             ),
             
-            # 🆕 BALANCED LLM SETTINGS - Allow complete thoughts
+            # 🆕 FASTEST LLM - gpt-4.1-nano is confirmed fastest
             llm=openai.LLM(
-                model="gpt-4.1-nano",    # Use the faster, newer model
-                temperature=0.7,         # Good balance
-                max_tokens=400,          # Allow complete responses
+                model="gpt-4.1-nano",    # Fastest model per OpenAI docs
+                temperature=0.7,         # Good balance for speed
+                max_tokens=300,          # Reasonable length for complete thoughts
             ),
             
             # 🆕 ELEVENLABS TTS WITH STREAMING - Correct syntax with category
