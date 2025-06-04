@@ -44,7 +44,7 @@ def fetch_token_from_supabase(session_id):
         raise ValueError("❌ Token not found for session_id")
     return data[0]['token'], data[0]['room'], data[0]['identity']
 
-async def entrypoint(ctx: JobContext):
+async def entrypoint(ctx):
     print("🚀 Starting entrypoint...")
     session_id = os.getenv("SESSION_ID")
     print(f"🔍 Using session ID: {session_id}")
