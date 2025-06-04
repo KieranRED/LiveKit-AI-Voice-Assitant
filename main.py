@@ -90,12 +90,12 @@ async def entrypoint(ctx: JobContext):
     
     try:
         assistant = VoiceAssistant(
-            # 🆕 PATIENT VAD SETTINGS - Let user finish speaking
+            # 🆕 VERY PATIENT VAD SETTINGS - Stop cutting you off!
             vad=silero.VAD.load(
-                min_speech_duration=0.1,        # Stable detection
-                min_silence_duration=0.6,       # Wait longer before responding
-                prefix_padding_duration=0.1,    # Good padding
-                activation_threshold=0.6,       # Less sensitive to avoid false triggers
+                min_speech_duration=0.2,        # Stable detection
+                min_silence_duration=1.0,       # Wait 1 full second before responding
+                prefix_padding_duration=0.2,    # Good padding
+                activation_threshold=0.7,       # Much less sensitive
             ),
             
             # 🆕 OPTIMIZED STT
@@ -111,24 +111,33 @@ async def entrypoint(ctx: JobContext):
                 max_tokens=300,          # Reasonable length for complete thoughts
             ),
             
-            # 🆕 ELEVENLABS TTS WITH STREAMING - Correct syntax with category
-            tts=elevenlabs.TTS(
-                voice=elevenlabs.Voice(
-                    id="21m00Tcm4TlvDq8ikWAM",  # Default voice (Rachel)
-                    name="Rachel",
-                    category="premade",        # Required: premade, cloned, professional
-                    settings=elevenlabs.VoiceSettings(
-                        stability=0.71,
-                        similarity_boost=0.5,
-                        style=0.0,
-                        use_speaker_boost=True,
-                    ),
-                ),
-                model="eleven_flash_v2_5",        # Fastest model
-                streaming_latency=4,              # Max streaming optimization (0-4)
-                enable_ssml_parsing=False,        # Faster without SSML
-                chunk_length_schedule=[50, 80, 120],  # Aggressive chunking for speed
+            # 🆕 CARTESIA TTS - Ultra-fast streaming with 90ms latency
+            tts=cartesia.TTS(
+                model="sonic-2",               # Correct model name (latest stable)
+                voice="6f84f4b8-58a2-430c-8c79-688dad597532",  # Your voice ID
+                speed=1.0,                     # Natural speed
+                encoding="pcm_s16le",          # Low latency encoding
+                sample_rate=24000,             # High quality audio
             ),
+            
+            # 🆕 ALTERNATIVE: ElevenLabs with quota-safe settings
+            # tts=elevenlabs.TTS(
+            #     voice=elevenlabs.Voice(
+            #         id="21m00Tcm4TlvDq8ikWAM",  # Default voice (Rachel)
+            #         name="Rachel",
+            #         category="premade",
+            #         settings=elevenlabs.VoiceSettings(
+            #             stability=0.71,
+            #             similarity_boost=0.5,
+            #             style=0.0,
+            #             use_speaker_boost=True,
+            #         ),
+            #     ),
+            #     model="eleven_flash_v2_5",        # Fastest model
+            #     streaming_latency=4,              # Max streaming optimization
+            #     enable_ssml_parsing=False,        # Faster without SSML
+            #     chunk_length_schedule=[100, 150, 250],  # Larger chunks for quota
+            # ),
             
             chat_ctx=initial_ctx,
             
