@@ -4,8 +4,8 @@ import os
 import requests
 from dotenv import load_dotenv
 from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, llm
-from livekit.agents.voice_assistant import VoiceAssistant
-from livekit.plugins import openai, silero, elevenlabs, cartesia  # 🔥 ADDED CARTESIA IMPORT
+from livekit.agents.voice_assistant import VoicePipelineAgent  # 🔥 CORRECT IMPORT
+from livekit.plugins import openai, silero, elevenlabs, cartesia
 from api import AssistantFnc
 from pdf_utils import extract_pdf_text
 from gpt_utils import get_prospect_prompt
@@ -157,8 +157,8 @@ async def entrypoint(ctx):
             )
             print("✅ DEBUG - Cartesia TTS created successfully")
             
-            print("🔧 DEBUG - Creating VoiceAssistant with all components...")
-            assistant = VoiceAssistant(
+            print("🔧 DEBUG - Creating VoicePipelineAgent with all components...")
+            assistant = VoicePipelineAgent(
                 vad=vad_instance,
                 stt=stt_instance,
                 llm=llm_instance,
@@ -167,7 +167,7 @@ async def entrypoint(ctx):
                 preemptive_synthesis=True,
                 fnc_ctx=fnc_ctx,
             )
-            print("✅ DEBUG - VoiceAssistant created successfully")
+            print("✅ DEBUG - VoicePipelineAgent created successfully")
             
         except Exception as e:
             print(f"❌ ERROR - Assistant setup failed: {e}")
