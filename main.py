@@ -1,10 +1,17 @@
-# main.py
+# main.py - UPDATED WITH MODERN LIVEKIT API
 import asyncio
 import os
 import requests
 from dotenv import load_dotenv
-from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, llm
-from livekit.agents.pipeline import VoicePipelineAgent  # 🔥 CORRECT IMPORT PATH
+from livekit.agents import (
+    Agent,
+    AgentSession, 
+    AutoSubscribe, 
+    JobContext, 
+    WorkerOptions, 
+    cli, 
+    llm
+)
 from livekit.plugins import openai, silero, elevenlabs, cartesia
 from api import AssistantFnc
 from pdf_utils import extract_pdf_text
@@ -100,17 +107,6 @@ async def entrypoint(ctx):
         print(prospect_prompt)
         print("\n" + "="*60 + "\n")
         
-        print("🧠 DEBUG - Building chat context...")
-        try:
-            initial_ctx = llm.ChatContext().append(
-                role="system",
-                text=prospect_prompt,
-            )
-            print("✅ DEBUG - Chat context built successfully")
-        except Exception as e:
-            print(f"❌ ERROR - Chat context build failed: {e}")
-            raise
-        
         print(f"📡 DEBUG - Attempting to connect to LiveKit room: '{room_name}'")
         try:
             await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
@@ -119,10 +115,16 @@ async def entrypoint(ctx):
             print(f"❌ ERROR - LiveKit connection failed: {e}")
             raise
         
-        print("🔧 DEBUG - Starting assistant setup with Cartesia TTS...")
-        fnc_ctx = AssistantFnc()
+        print("🔧 DEBUG - Creating Agent and AgentSession with Cartesia TTS...")
         
         try:
+            print("🔧 DEBUG - Creating Agent with instructions...")
+            agent = Agent(
+                instructions=prospect_prompt,
+                # Add tools if needed from fnc_ctx
+            )
+            print("✅ DEBUG - Agent created successfully")
+            
             print("🔧 DEBUG - Creating VAD with settings...")
             vad_instance = silero.VAD.load(
                 min_speech_duration=0.2,
@@ -157,77 +159,27 @@ async def entrypoint(ctx):
             )
             print("✅ DEBUG - Cartesia TTS created successfully")
             
-            print("🔧 DEBUG - Creating VoicePipelineAgent with all components...")
-            assistant = VoicePipelineAgent(
+            print("🔧 DEBUG - Creating AgentSession with all components...")
+            session = AgentSession(
                 vad=vad_instance,
                 stt=stt_instance,
                 llm=llm_instance,
                 tts=tts_instance,
-                chat_ctx=initial_ctx,
-                preemptive_synthesis=True,
-                fnc_ctx=fnc_ctx,
             )
-            print("✅ DEBUG - VoicePipelineAgent created successfully")
+            print("✅ DEBUG - AgentSession created successfully")
             
         except Exception as e:
-            print(f"❌ ERROR - Assistant setup failed: {e}")
+            print(f"❌ ERROR - Agent/Session setup failed: {e}")
             import traceback
             traceback.print_exc()
             return
         
         try:
-            print("🔧 DEBUG - Setting up event listeners...")
-            
-            # Event tracking variables
-            last_user_speech_time = 0
-            last_agent_speech_time = 0
-            
-            @assistant.on("user_speech_committed")
-            def on_user_speech(msg):
-                nonlocal last_user_speech_time
-                current_time = asyncio.get_event_loop().time()
-                if current_time - last_user_speech_time > 0.5:
-                    print(f"🎤 DEBUG - USER SPEECH COMMITTED: {msg.content}")
-                    last_user_speech_time = current_time
-                
-            @assistant.on("agent_speech_committed") 
-            def on_agent_speech(msg):
-                nonlocal last_agent_speech_time
-                current_time = asyncio.get_event_loop().time()
-                if current_time - last_agent_speech_time > 0.5:
-                    print(f"🤖 DEBUG - AGENT SPEECH COMMITTED: {msg.content}")
-                    last_agent_speech_time = current_time
-                
-            @assistant.on("user_started_speaking")
-            def on_user_start():
-                print("🎤 DEBUG - USER STARTED SPEAKING")
-                
-            @assistant.on("user_stopped_speaking")
-            def on_user_stop():
-                print("🎤 DEBUG - USER STOPPED SPEAKING")
-                
-            @assistant.on("agent_started_speaking")
-            def on_agent_start():
-                print("🤖 DEBUG - AGENT STARTED SPEAKING")
-                
-            @assistant.on("agent_stopped_speaking")
-            def on_agent_stop(): 
-                print("🤖 DEBUG - AGENT STOPPED SPEAKING")
-                
-            print("✅ DEBUG - Event listeners configured successfully")
-            
+            print("🔧 DEBUG - Starting AgentSession...")
+            await session.start(agent=agent, room=ctx.room)
+            print("✅ DEBUG - AgentSession started successfully")
         except Exception as e:
-            print(f"❌ ERROR - Event listener setup failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return
-        
-        try:
-            print("🔧 DEBUG - Starting assistant in room...")
-            assistant.start(ctx.room)
-            print("✅ DEBUG - Assistant started successfully in room")
-        except Exception as e:
-            print(f"❌ ERROR - Assistant start failed: {e}")
+            print(f"❌ ERROR - AgentSession start failed: {e}")
             import traceback
             traceback.print_exc()
             return
@@ -235,11 +187,11 @@ async def entrypoint(ctx):
         try:
             print("🗣️ DEBUG - Preparing to speak welcome message...")
             await asyncio.sleep(0.5)
-            print("🗣️ DEBUG - Calling assistant.say() for welcome message...")
+            print("🗣️ DEBUG - Calling session.generate_reply() for welcome message...")
             
-            await assistant.say("Hey! Can you hear me clearly?", allow_interruptions=True)
+            await session.generate_reply(instructions="Greet the user by saying 'Hey! Can you hear me clearly?'")
             
-            print("✅ DEBUG - Welcome message say() call completed")
+            print("✅ DEBUG - Welcome message generate_reply() call completed")
         except Exception as e:
             print(f"❌ ERROR - Welcome message failed: {e}")
             import traceback
