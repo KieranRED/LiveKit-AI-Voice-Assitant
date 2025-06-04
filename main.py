@@ -5,7 +5,7 @@ import requests
 from dotenv import load_dotenv
 from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, llm
 from livekit.agents.voice_assistant import VoiceAssistant
-from livekit.plugins import openai, silero  # 🆕 Removed elevenlabs import
+from livekit.plugins import openai, silero, elevenlabs
 from api import AssistantFnc
 from pdf_utils import extract_pdf_text
 from gpt_utils import get_prospect_prompt
@@ -13,15 +13,15 @@ from gpt_utils import get_prospect_prompt
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE") # Use service role or env-safe key
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE")
 
-# 🆕 DEBUG: Log what environment variables we actually have
+# DEBUG: Log environment variables
 print("🔍 DEBUG - Environment variables in Fly machine:")
 print(f"SUPABASE_URL: {'✅ Set' if SUPABASE_URL else '❌ Missing'} - {SUPABASE_URL}")
 print(f"SUPABASE_SERVICE_ROLE: {'✅ Set' if SUPABASE_KEY else '❌ Missing'} - {SUPABASE_KEY[:20] if SUPABASE_KEY else 'None'}...")
 print(f"SESSION_ID: {'✅ Set' if os.getenv('SESSION_ID') else '❌ Missing'}")
 print(f"OPENAI_API_KEY: {'✅ Set' if os.getenv('OPENAI_API_KEY') else '❌ Missing'}")
-print(f"ELEVEN_API_KEY: {'✅ Set' if os.getenv('ELEVEN_API_KEY') else '❌ Missing'}")  # Keep this for debugging
+print(f"ELEVEN_API_KEY: {'✅ Set' if os.getenv('ELEVEN_API_KEY') else '❌ Missing'}")
 
 def fetch_token_from_supabase(session_id):
     url = f"{SUPABASE_URL}/rest/v1/livekit_tokens?token=eq.{session_id}"
@@ -31,7 +31,6 @@ def fetch_token_from_supabase(session_id):
         "Accept": "application/json"
     }
     
-    # 🆕 DEBUG: Log the request details
     print(f"🔍 DEBUG - Making request to: {url}")
     print(f"🔍 DEBUG - Headers: apikey={SUPABASE_KEY[:20] if SUPABASE_KEY else 'None'}...")
     
@@ -47,7 +46,7 @@ def fetch_token_from_supabase(session_id):
 
 async def entrypoint(ctx: JobContext):
     print("🚀 Starting entrypoint...")
-    session_id = os.getenv("SESSION_ID") # Must be passed into environment or injected
+    session_id = os.getenv("SESSION_ID")
     print(f"🔍 Using session ID: {session_id}")
     
     token, room_name, identity = fetch_token_from_supabase(session_id)
@@ -86,48 +85,70 @@ async def entrypoint(ctx: JobContext):
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
     print("✅ Connected to room.")
     
-    print("🔧 Setting up assistant with improved VAD settings...")
+    print("🔧 Setting up assistant with ultra-fast settings...")
     fnc_ctx = AssistantFnc()
     
     try:
         assistant = VoiceAssistant(
-            # 🆕 SLIGHTLY IMPROVED VAD - minimal changes from your original
+            # 🆕 ULTRA-FAST VAD SETTINGS - Prioritize speed
             vad=silero.VAD.load(
-                min_speech_duration=0.2,        # Between your 0.08 and my 0.15
-                min_silence_duration=0.8,       # Between your 0.4 and 0.8
-                prefix_padding_duration=0.2,    # Keep your original
-                activation_threshold=0.6,       # Keep default
+                min_speech_duration=0.08,       # Very low - quick detection
+                min_silence_duration=0.3,       # Much lower - faster cutoff
+                prefix_padding_duration=0.05,   # Minimal padding
+                activation_threshold=0.4,       # Lower threshold - more sensitive
             ),
+            
+            # 🆕 OPTIMIZED STT
             stt=openai.STT(
                 model="whisper-1",
                 language="en",
             ),
+            
+            # 🆕 SPEED-OPTIMIZED LLM SETTINGS
             llm=openai.LLM(
-                model="gpt-4.1-nano",    # Keep your preferred model
-                temperature=0.8,         # Keep your original
-                max_tokens=512,          # Keep your original
+                model="gpt-4.1-nano",    # Use the faster, newer model
+                temperature=0.7,         # Slightly lower for faster generation
+                max_tokens=256,          # Shorter responses = faster processing
             ),
-            tts=openai.TTS(
-                voice="nova",  # Keep your preference
-                model="tts-1",
-                instructions="",
+            
+            # 🆕 STREAMING TTS WITH ELEVENLABS - Much faster response
+            tts=elevenlabs.TTS(
+                voice_id="21m00Tcm4TlvDq8ikWAM",  # Default voice or use your preferred voice
+                model="eleven_turbo_v2_5",        # Fastest model
+                streaming_latency=4,              # Max streaming optimization
+                enable_ssml_parsing=False,        # Faster without SSML
             ),
+            
             chat_ctx=initial_ctx,
-            preemptive_synthesis=True,
+            
+            # 🆕 ONLY USE ACTUAL LIVEKIT FEATURES
+            preemptive_synthesis=True,         # This exists and helps
+            
             fnc_ctx=fnc_ctx,
         )
-        print("✅ Assistant object created.")
+        print("✅ Assistant object created with ultra-fast settings.")
         
-        # 🆕 SIMPLIFIED EVENT LISTENERS - closer to your original
-        speech_buffer_time = 0.3  # Our new addition
+        # 🆕 IMPROVED EVENT LISTENERS with debouncing and speech buffer
+        last_user_speech_time = 0
+        last_agent_speech_time = 0
+        speech_buffer_time = 0.2  # Reduced from 0.3 for faster response
         
         @assistant.on("user_speech_committed")
         def on_user_speech(msg):
-            print(f"🎤 USER SAID: {msg.content}")
+            nonlocal last_user_speech_time
+            current_time = asyncio.get_event_loop().time()
+            # Debounce rapid fire events
+            if current_time - last_user_speech_time > 0.5:
+                print(f"🎤 USER SAID: {msg.content}")
+                last_user_speech_time = current_time
             
         @assistant.on("agent_speech_committed") 
         def on_agent_speech(msg):
-            print(f"🤖 BOT SAID: {msg.content}")
+            nonlocal last_agent_speech_time
+            current_time = asyncio.get_event_loop().time()
+            if current_time - last_agent_speech_time > 0.5:
+                print(f"🤖 BOT SAID: {msg.content}")
+                last_agent_speech_time = current_time
             
         @assistant.on("user_started_speaking")
         def on_user_start():
@@ -153,7 +174,7 @@ async def entrypoint(ctx: JobContext):
     
     try:
         assistant.start(ctx.room)
-        print("✅ Assistant started.")
+        print("✅ Assistant started with ultra-fast settings.")
     except Exception as e:
         print("❌ Error starting assistant:", e)
         import traceback
@@ -161,8 +182,9 @@ async def entrypoint(ctx: JobContext):
         return
     
     try:
-        await asyncio.sleep(1)
-        await assistant.say("Hey there! I'm ready to chat. Can you hear me clearly?", allow_interruptions=True)
+        # 🆕 MINIMAL WELCOME MESSAGE for fastest start
+        await asyncio.sleep(0.3)  # Even shorter wait
+        await assistant.say("Hey! Can you hear me clearly?", allow_interruptions=True)
         print("🗣️ Assistant spoke the welcome message.")
     except Exception as e:
         print("❌ Error during welcome message:", e)
