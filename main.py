@@ -111,11 +111,18 @@ async def entrypoint(ctx: JobContext):
                 max_tokens=400,          # Allow complete responses
             ),
             
-            # 🆕 ELEVENLABS TTS WITH STREAMING - Correct new syntax
+            # 🆕 ELEVENLABS TTS WITH STREAMING - Correct syntax with category
             tts=elevenlabs.TTS(
                 voice=elevenlabs.Voice(
                     id="21m00Tcm4TlvDq8ikWAM",  # Default voice (Rachel)
                     name="Rachel",
+                    category="premade",        # Required: premade, cloned, professional
+                    settings=elevenlabs.VoiceSettings(
+                        stability=0.71,
+                        similarity_boost=0.5,
+                        style=0.0,
+                        use_speaker_boost=True,
+                    ),
                 ),
                 model="eleven_flash_v2_5",        # Fastest model
                 streaming_latency=4,              # Max streaming optimization (0-4)
