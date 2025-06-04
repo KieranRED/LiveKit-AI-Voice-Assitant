@@ -90,12 +90,12 @@ async def entrypoint(ctx: JobContext):
     
     try:
         assistant = VoiceAssistant(
-            # 🆕 ULTRA-FAST VAD SETTINGS - Prioritize speed
+            # 🆕 EXTREME VAD SETTINGS - Zero tolerance for delays
             vad=silero.VAD.load(
-                min_speech_duration=0.08,       # Very low - quick detection
-                min_silence_duration=0.3,       # Much lower - faster cutoff
-                prefix_padding_duration=0.05,   # Minimal padding
-                activation_threshold=0.4,       # Lower threshold - more sensitive
+                min_speech_duration=0.05,       # Even lower - instant detection
+                min_silence_duration=0.2,       # Extremely aggressive
+                prefix_padding_duration=0.02,   # Minimal padding
+                activation_threshold=0.3,       # Very low threshold
             ),
             
             # 🆕 OPTIMIZED STT
@@ -104,19 +104,23 @@ async def entrypoint(ctx: JobContext):
                 language="en",
             ),
             
-            # 🆕 SPEED-OPTIMIZED LLM SETTINGS
+            # 🆕 BALANCED LLM SETTINGS - Allow complete thoughts
             llm=openai.LLM(
                 model="gpt-4.1-nano",    # Use the faster, newer model
-                temperature=0.7,         # Slightly lower for faster generation
-                max_tokens=1000,          # Shorter responses = faster processing
+                temperature=0.7,         # Good balance
+                max_tokens=400,          # Allow complete responses
             ),
             
-            # 🆕 STREAMING TTS WITH ELEVENLABS - Much faster response
+            # 🆕 ELEVENLABS TTS WITH STREAMING - Correct new syntax
             tts=elevenlabs.TTS(
-                voice_id="21m00Tcm4TlvDq8ikWAM",  # Default voice or use your preferred voice
-                model="eleven_turbo_v2_5",        # Fastest model
-                streaming_latency=4,              # Max streaming optimization
+                voice=elevenlabs.Voice(
+                    id="21m00Tcm4TlvDq8ikWAM",  # Default voice (Rachel)
+                    name="Rachel",
+                ),
+                model="eleven_flash_v2_5",        # Fastest model
+                streaming_latency=4,              # Max streaming optimization (0-4)
                 enable_ssml_parsing=False,        # Faster without SSML
+                chunk_length_schedule=[50, 80, 120],  # Aggressive chunking for speed
             ),
             
             chat_ctx=initial_ctx,
