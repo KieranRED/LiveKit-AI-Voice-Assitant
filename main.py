@@ -4,7 +4,7 @@ import os
 import requests
 from dotenv import load_dotenv
 from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, llm
-from livekit.agents.voice_assistant import VoicePipelineAgent  # 🔥 CORRECT IMPORT
+from livekit.agents.pipeline import VoicePipelineAgent  # 🔥 CORRECT IMPORT PATH
 from livekit.plugins import openai, silero, elevenlabs, cartesia
 from api import AssistantFnc
 from pdf_utils import extract_pdf_text
