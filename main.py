@@ -22,12 +22,20 @@ from gpt_utils import get_prospect_prompt
 
 load_dotenv()
 
-# Configure structured logging
+# Configure structured logging - SUPPRESS DEBUG SPAM
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)-8s | %(message)s',
     datefmt='%H:%M:%S'
 )
+
+# Silence noisy third-party loggers
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING) 
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 # Environment variables
@@ -120,13 +128,8 @@ def setup_session_handlers(session: AgentSession, conv_logger: ConversationLogge
         if event.new_state == "thinking":
             conv_logger.log_agent_thinking()
     
-    # Log important state changes only
-    @session.on("user_state_changed")
-    def on_user_state_change(event):
-        if event.new_state == "speaking":
-            logger.debug("🎤 User started speaking")
-        elif event.old_state == "speaking":
-            logger.debug("🎤 User finished speaking")
+    # Only log critical user state changes (remove debug level)
+    # Remove these debug logs entirely to reduce noise
     
     logger.info("Event handlers configured")
 
@@ -152,11 +155,15 @@ async def entrypoint(ctx):
         business_pdf_text = extract_pdf_text(pdf_path)
         logger.info(f"✅ PDF loaded ({len(business_pdf_text)} chars)")
         
-        # Generate prospect prompt
+        # Generate prospect prompt with shorter responses
         logger.info("🧠 Generating prospect persona...")
         prospect_prompt = await get_prospect_prompt(
             "strict", "trust", 5, "discovery", "direct", business_pdf_text
         )
+        
+        # Add speed optimization to the prompt
+        prospect_prompt += "\n\nIMPORTANT: Keep responses very short (1 sentence, max 15 words) for natural conversation flow. Be direct and conversational."
+        
         logger.info(f"✅ Persona generated ({len(prospect_prompt)} chars)")
         
         # Show prospect details (condensed)
@@ -187,14 +194,19 @@ async def entrypoint(ctx):
         )
         
         stt_instance = openai.STT(model="whisper-1", language="en")
-        llm_instance = openai.LLM(model="gpt-4.1-nano", temperature=0.7)
+        llm_instance = openai.LLM(
+            model="gpt-4.1-nano", 
+            temperature=0.7,
+            max_tokens=75,  # Even shorter for faster TTS generation
+        )
         
         tts_instance = cartesia.TTS(
-            model="sonic-2",
+            model="sonic-2",  # Keep Sonic-2 as requested
             voice="6f84f4b8-58a2-430c-8c79-688dad597532",
-            speed=1.0,
-            encoding="pcm_s16le",
-            sample_rate=24000,
+            speed=1.2,  # Faster speech for quicker playback
+            encoding="pcm_s16le", 
+            sample_rate=22050,  # Slightly lower than 24kHz for speed
+            # Streaming is enabled by default in LiveKit
         )
         
         session = AgentSession(
@@ -223,10 +235,10 @@ async def entrypoint(ctx):
         logger.info(f"🎉 Sales bot ready! (startup: {elapsed:.1f}s)")
         logger.info("🗣️ Conversation active - user can now speak...")
         
-        # Simple heartbeat (less frequent)
+        # Simple heartbeat (much less frequent)
         while True:
-            await asyncio.sleep(30)
-            logger.debug("💓 Session active")
+            await asyncio.sleep(60)  # Every minute instead of 30 seconds
+            logger.info("💓 Bot active")
             
     except Exception as e:
         logger.error(f"❌ Startup failed: {e}")
