@@ -162,7 +162,7 @@ async def entrypoint(ctx):
         )
         
         # Add speed optimization to the prompt
-        prospect_prompt += "\n\nIMPORTANT: Keep responses very short (1 sentence, max 15 words) for natural conversation flow. Be direct and conversational."
+        prospect_prompt += "\n\nIMPORTANT: Keep responses very short (1 sentence, max 10-15 words) for natural conversation flow. Be direct and conversational."
         
         logger.info(f"✅ Persona generated ({len(prospect_prompt)} chars)")
         
@@ -194,19 +194,32 @@ async def entrypoint(ctx):
         )
         
         stt_instance = openai.STT(model="whisper-1", language="en")
+        # Initialize LLM with debugging
+        logger.info("🧠 Initializing OpenAI LLM...")
         llm_instance = openai.LLM(
             model="gpt-4.1-nano", 
             temperature=0.7,
+            # max_tokens is not supported in LiveKit's LLM constructor
+            # Token limit will be controlled via the prompt instead
         )
+        logger.info("✅ LLM initialized successfully")
         
-        tts_instance = cartesia.TTS(
-            model="sonic-2",  # Keep Sonic-2 as requested
-            voice="6f84f4b8-58a2-430c-8c79-688dad597532",
-            speed=1.2,  # Faster speech for quicker playback
-            encoding="pcm_s16le", 
-            sample_rate=22050,  # Slightly lower than 24kHz for speed
-            # Streaming is enabled by default in LiveKit
-        )
+        # Initialize TTS with debugging and fallback
+        logger.info("🔊 Initializing Cartesia TTS...")
+        try:
+            tts_instance = cartesia.TTS(
+                model="sonic-2",  # Keep Sonic-2 as requested
+                voice="6f84f4b8-58a2-430c-8c79-688dad597532",  # Rachel voice
+                speed=1.2,  # Faster speech for quicker playback
+                encoding="pcm_s16le", 
+                sample_rate=22050,  # Slightly lower than 24kHz for speed
+            )
+            logger.info("✅ Cartesia TTS initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ Cartesia TTS failed: {e}")
+            logger.info("🔄 Falling back to ElevenLabs TTS...")
+            tts_instance = elevenlabs.TTS()
+            logger.info("✅ ElevenLabs TTS initialized as fallback")
         
         session = AgentSession(
             vad=vad_instance,
