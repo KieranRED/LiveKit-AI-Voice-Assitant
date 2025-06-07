@@ -197,7 +197,6 @@ async def entrypoint(ctx):
         llm_instance = openai.LLM(
             model="gpt-4.1-nano", 
             temperature=0.7,
-            max_tokens=75,  # Even shorter for faster TTS generation
         )
         
         tts_instance = cartesia.TTS(
