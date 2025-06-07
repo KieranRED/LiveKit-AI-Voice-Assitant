@@ -176,7 +176,7 @@ async def entrypoint(ctx):
             # 🔍 ADD DEBUG EVENT HANDLERS
             print("🔧 DEBUG - Adding event handlers for speech detection...")
             
-            # Try different event handler names to see which ones work
+            # Add MORE event handlers to catch everything
             try:
                 @session.on("user_speech_committed")
                 def on_user_speech_committed(text: str):
@@ -234,6 +234,42 @@ async def entrypoint(ctx):
             except Exception as e:
                 print(f"❌ DEBUG - user_transcript handler failed: {e}")
             
+            # Try even more event variations
+            try:
+                @session.on("stt_final_transcript")
+                def on_stt_final_transcript(text: str):
+                    print(f"🎤 DEBUG - STT final transcript: '{text}'")
+                print("✅ DEBUG - stt_final_transcript handler added")
+            except Exception as e:
+                print(f"❌ DEBUG - stt_final_transcript handler failed: {e}")
+                
+            try:
+                @session.on("vad_speech_start")
+                def on_vad_speech_start():
+                    print("🎤 DEBUG - VAD speech start detected")
+                print("✅ DEBUG - vad_speech_start handler added")
+            except Exception as e:
+                print(f"❌ DEBUG - vad_speech_start handler failed: {e}")
+                
+            try:
+                @session.on("vad_speech_end")
+                def on_vad_speech_end():
+                    print("🎤 DEBUG - VAD speech end detected")
+                print("✅ DEBUG - vad_speech_end handler added")
+            except Exception as e:
+                print(f"❌ DEBUG - vad_speech_end handler failed: {e}")
+            
+            # Add a generic catch-all event listener
+            try:
+                original_emit = session.emit
+                def debug_emit(event, *args, **kwargs):
+                    print(f"🔄 DEBUG - Event emitted: '{event}' with args: {args}")
+                    return original_emit(event, *args, **kwargs)
+                session.emit = debug_emit
+                print("✅ DEBUG - Generic event logger added")
+            except Exception as e:
+                print(f"❌ DEBUG - Generic event logger failed: {e}")
+            
             print("✅ DEBUG - AgentSession created successfully")
             
         except Exception as e:
@@ -247,6 +283,16 @@ async def entrypoint(ctx):
             await session.start(agent=agent, room=ctx.room)
             print("✅ DEBUG - AgentSession started successfully")
             print("🔄 DEBUG - Session running - speak now and watch for VAD/STT logs...")
+            
+            # Add a heartbeat to confirm the session is active
+            async def heartbeat():
+                while True:
+                    await asyncio.sleep(10)
+                    print("💓 DEBUG - Session heartbeat - still running and listening...")
+            
+            # Start heartbeat task
+            heartbeat_task = asyncio.create_task(heartbeat())
+            print("✅ DEBUG - Heartbeat monitoring started")
         except Exception as e:
             print(f"❌ ERROR - AgentSession start failed: {e}")
             import traceback
