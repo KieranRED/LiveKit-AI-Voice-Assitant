@@ -157,7 +157,7 @@ async def entrypoint(ctx):
             llm_instance = openai.LLM(
                 model="gpt-4.1-nano",    # 🔥 ULTRA-FAST NANO MODEL
                 temperature=0.7,
-                max_tokens=300,
+                # max_tokens handled by the model internally
             )
             print("✅ DEBUG - LLM created successfully")
             
