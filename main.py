@@ -1,6 +1,7 @@
 import asyncio
 import os
 import requests
+import traceback
 from dotenv import load_dotenv
 from livekit.agents import (
     Agent,
@@ -13,6 +14,7 @@ from livekit.agents import (
     RunContext
 )
 from livekit.agents.llm import function_tool
+from livekit import rtc  # Add this import for audio handling
 from livekit.plugins import openai, silero, cartesia, elevenlabs, cartesia
 from pdf_utils import extract_pdf_text
 from gpt_utils import get_prospect_prompt
@@ -203,21 +205,26 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             print(f"❌ user_stopped_speaking handler failed: {e}")
         
+        # Add agent response tracking with TTS monitoring
+        try:
+            @session.on("conversation_item_added")
+            def on_conversation_item_added(item):
+                if hasattr(item, 'role') and item.role == 'assistant':
+                    agent_msg_count[0] += 1
+                    content = item.content[0] if item.content else "No content"
+                    print(f"🤖 AGENT [{agent_msg_count[0]:02d}]: {content}")
+            print("✅ conversation_item_added handler added")
+        except Exception as e:
+            print(f"❌ conversation_item_added handler failed: {e}")
+            
+        # Add TTS-specific event handlers
         try:
             @session.on("agent_started_speaking")
             def on_agent_started_speaking():
-                print("🗣️ Agent started speaking")
+                print("🔊 Agent started speaking (TTS active)")
             print("✅ agent_started_speaking handler added")
         except Exception as e:
             print(f"❌ agent_started_speaking handler failed: {e}")
-            
-        try:
-            @session.on("agent_stopped_speaking") 
-            def on_agent_stopped_speaking():
-                print("🗣️ Agent stopped speaking")
-            print("✅ agent_stopped_speaking handler added")
-        except Exception as e:
-            print(f"❌ agent_stopped_speaking handler failed: {e}")
         
         # Try additional event variations
         try:
