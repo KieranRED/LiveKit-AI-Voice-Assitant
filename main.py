@@ -10,10 +10,11 @@ from livekit.agents import (
     JobContext, 
     WorkerOptions, 
     cli, 
-    llm
+    llm,
+    RunContext
 )
-from livekit.plugins import openai, silero, elevenlabs, cartesia
-from api import AssistantFnc
+from livekit.agents.llm import function_tool
+from livekit.plugins import openai, silero, cartesia, elevenlabs, cartesia
 from pdf_utils import extract_pdf_text
 from gpt_utils import get_prospect_prompt
 
@@ -31,6 +32,20 @@ print(f"SESSION_ID: {'✅ Set' if os.getenv('SESSION_ID') else '❌ Missing'}")
 print(f"OPENAI_API_KEY: {'✅ Set' if os.getenv('OPENAI_API_KEY') else '❌ Missing'}")
 print(f"ELEVEN_API_KEY: {'✅ Set' if os.getenv('ELEVEN_API_KEY') else '❌ Missing'}")
 print(f"CARTESIA_API_KEY: {'✅ Set' if CARTESIA_API_KEY else '❌ Missing'}")
+
+# Modern Agent class with function tools
+class ProspectAgent(Agent):
+    def __init__(self, prospect_prompt: str):
+        super().__init__(
+            instructions=prospect_prompt,
+        )
+        print("✅ DEBUG - ProspectAgent created with function tools")
+    
+    @function_tool()
+    async def end_call(self, context: RunContext, reason: str) -> str:
+        """End the current call with a reason."""
+        print(f"🔚 DEBUG - Call ended with reason: {reason}")
+        return f"Call ended: {reason}"
 
 def fetch_token_from_supabase(session_id):
     print("🔍 DEBUG - Starting Supabase token fetch...")
@@ -115,15 +130,12 @@ async def entrypoint(ctx):
             print(f"❌ ERROR - LiveKit connection failed: {e}")
             raise
         
-        print("🔧 DEBUG - Creating Agent and AgentSession with Cartesia TTS...")
+        print("🔧 DEBUG - Creating Agent and AgentSession with gpt-4.1-nano + Cartesia Sonic 2...")
         
         try:
-            print("🔧 DEBUG - Creating Agent with instructions...")
-            agent = Agent(
-                instructions=prospect_prompt,
-                # Add tools if needed from fnc_ctx
-            )
-            print("✅ DEBUG - Agent created successfully")
+            print("🔧 DEBUG - Creating ProspectAgent with instructions...")
+            agent = ProspectAgent(prospect_prompt)
+            print("✅ DEBUG - ProspectAgent created successfully")
             
             print("🔧 DEBUG - Creating VAD with settings...")
             vad_instance = silero.VAD.load(
@@ -141,18 +153,18 @@ async def entrypoint(ctx):
             )
             print("✅ DEBUG - STT created successfully")
             
-            print("🔧 DEBUG - Creating LLM with gpt-4.1-nano...")
+            print("🔥 DEBUG - Creating LLM with gpt-4.1-nano...")
             llm_instance = openai.LLM(
-                model="gpt-4.1-nano",
+                model="gpt-4.1-nano",    # 🔥 ULTRA-FAST NANO MODEL
                 temperature=0.7,
                 max_tokens=300,
             )
             print("✅ DEBUG - LLM created successfully")
             
-            print("🔧 DEBUG - Creating Cartesia TTS with sonic-2 model...")
+            print("🔥 DEBUG - Creating Cartesia TTS with Sonic 2 model...")
             tts_instance = cartesia.TTS(
-                model="sonic-2",
-                voice="6f84f4b8-58a2-430c-8c79-688dad597532",
+                model="sonic-2",                          # 🔥 CARTESIA SONIC 2 MODEL
+                voice="6f84f4b8-58a2-430c-8c79-688dad597532",  # 🔥 SPECIFIC VOICE ID
                 speed=1.0,
                 encoding="pcm_s16le",
                 sample_rate=24000,
