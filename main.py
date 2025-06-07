@@ -1,7 +1,9 @@
-# main.py - UPDATED WITH MODERN LIVEKIT API + DEBUG LOGGING
+# main.py - CLEANED UP VERSION WITH STRUCTURED LOGGING
 import asyncio
 import os
 import requests
+import logging
+from datetime import datetime
 from dotenv import load_dotenv
 from livekit.agents import (
     Agent,
@@ -20,29 +22,43 @@ from gpt_utils import get_prospect_prompt
 
 load_dotenv()
 
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)-8s | %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+# Environment variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE")
 CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY")
 
-# DEBUG: Log environment variables
-print("🔍 DEBUG - Environment variables in Fly machine:")
-print(f"SUPABASE_URL: {'✅ Set' if SUPABASE_URL else '❌ Missing'} - {SUPABASE_URL}")
-print(f"SUPABASE_SERVICE_ROLE: {'✅ Set' if SUPABASE_KEY else '❌ Missing'} - {SUPABASE_KEY[:20] if SUPABASE_KEY else 'None'}...")
-print(f"SESSION_ID: {'✅ Set' if os.getenv('SESSION_ID') else '❌ Missing'}")
-print(f"OPENAI_API_KEY: {'✅ Set' if os.getenv('OPENAI_API_KEY') else '❌ Missing'}")
-print(f"ELEVEN_API_KEY: {'✅ Set' if os.getenv('ELEVEN_API_KEY') else '❌ Missing'}")
-print(f"CARTESIA_API_KEY: {'✅ Set' if CARTESIA_API_KEY else '❌ Missing'}")
+def log_environment_check():
+    """Log environment variable status in a clean format"""
+    env_status = {
+        "SUPABASE_URL": "✅" if SUPABASE_URL else "❌",
+        "SUPABASE_SERVICE_ROLE": "✅" if SUPABASE_KEY else "❌", 
+        "SESSION_ID": "✅" if os.getenv('SESSION_ID') else "❌",
+        "OPENAI_API_KEY": "✅" if os.getenv('OPENAI_API_KEY') else "❌",
+        "ELEVEN_API_KEY": "✅" if os.getenv('ELEVEN_API_KEY') else "❌",
+        "CARTESIA_API_KEY": "✅" if CARTESIA_API_KEY else "❌"
+    }
+    
+    logger.info("Environment Check: " + " | ".join([f"{k}: {v}" for k, v in env_status.items()]))
 
-# Modern Agent class - REMOVED end_call function to prevent auto-hangups
 class ProspectAgent(Agent):
     def __init__(self, prospect_prompt: str):
         super().__init__(
             instructions=prospect_prompt + "\n\nIMPORTANT: Never end the call unless explicitly asked. Stay in character and continue the conversation.",
         )
-        print("✅ DEBUG - ProspectAgent created without auto-end function")
+        logger.info("ProspectAgent initialized successfully")
 
 def fetch_token_from_supabase(session_id):
-    print("🔍 DEBUG - Starting Supabase token fetch...")
+    """Fetch LiveKit token from Supabase with clean error handling"""
+    logger.info(f"Fetching token for session: {session_id[:20]}...")
+    
     url = f"{SUPABASE_URL}/rest/v1/livekit_tokens?token=eq.{session_id}"
     headers = {
         "apikey": SUPABASE_KEY,
@@ -50,272 +66,172 @@ def fetch_token_from_supabase(session_id):
         "Accept": "application/json"
     }
     
-    print(f"🔍 DEBUG - Making request to: {url}")
-    print(f"🔍 DEBUG - Headers: apikey={SUPABASE_KEY[:20] if SUPABASE_KEY else 'None'}...")
-    
     try:
         res = requests.get(url, headers=headers)
-        print(f"🔍 DEBUG - Response status: {res.status_code}")
-        print(f"🔍 DEBUG - Response text: {res.text[:200]}...")
-        
         res.raise_for_status()
         data = res.json()
+        
         if not data:
-            print("❌ ERROR - Token not found for session_id")
-            raise ValueError("❌ Token not found for session_id")
+            raise ValueError("Token not found for session_id")
         
         token_data = data[0]
-        print(f"✅ SUCCESS - Retrieved token for room: {token_data['room']}, identity: {token_data['identity']}")
+        logger.info(f"✅ Token retrieved | Room: {token_data['room']} | Identity: {token_data['identity']}")
         return token_data['token'], token_data['room'], token_data['identity']
+        
     except Exception as e:
-        print(f"❌ ERROR - Supabase fetch failed: {e}")
+        logger.error(f"❌ Supabase token fetch failed: {e}")
         raise
 
+class ConversationLogger:
+    """Clean conversation logging without spam"""
+    
+    def __init__(self):
+        self.conversation_count = 0
+        
+    def log_user_speech(self, text: str):
+        """Log user speech cleanly"""
+        self.conversation_count += 1
+        logger.info(f"🎤 USER [{self.conversation_count:02d}]: {text}")
+        
+    def log_agent_speech(self, text: str):
+        """Log agent speech cleanly"""
+        logger.info(f"🤖 AGENT [{self.conversation_count:02d}]: {text}")
+        
+    def log_agent_thinking(self):
+        """Log when agent is processing"""
+        logger.info(f"🧠 AGENT: Processing response...")
+
+def setup_session_handlers(session: AgentSession, conv_logger: ConversationLogger):
+    """Setup essential event handlers without spam"""
+    
+    # Track conversation flow
+    @session.on("user_input_transcribed") 
+    def on_user_speech(event):
+        if event.is_final and event.transcript.strip():
+            conv_logger.log_user_speech(event.transcript)
+    
+    @session.on("conversation_item_added")
+    def on_conversation_item(event):
+        if event.item.role == "assistant" and not event.item.interrupted:
+            conv_logger.log_agent_speech(" ".join(event.item.content))
+    
+    @session.on("agent_state_changed")
+    def on_agent_state_change(event):
+        if event.new_state == "thinking":
+            conv_logger.log_agent_thinking()
+    
+    # Log important state changes only
+    @session.on("user_state_changed")
+    def on_user_state_change(event):
+        if event.new_state == "speaking":
+            logger.debug("🎤 User started speaking")
+        elif event.old_state == "speaking":
+            logger.debug("🎤 User finished speaking")
+    
+    logger.info("Event handlers configured")
+
 async def entrypoint(ctx):
-    print("🚀 DEBUG - Starting entrypoint function...")
+    """Main entrypoint with clean logging"""
+    start_time = datetime.now()
+    logger.info("🚀 Starting AI Sales Bot...")
     
     try:
+        # Environment check
+        log_environment_check()
+        
+        # Get session details
         session_id = os.getenv("SESSION_ID")
-        print(f"🔍 DEBUG - Retrieved session ID: {session_id}")
+        logger.info(f"Session ID: {session_id[:20]}...")
         
-        print("🔍 DEBUG - Fetching token from Supabase...")
+        # Fetch token
         token, room_name, identity = fetch_token_from_supabase(session_id)
-        print(f"✅ DEBUG - Token fetch successful for room: {room_name}")
         
+        # Load PDF content
         pdf_path = "assets/sales.pdf"
-        print(f"📄 DEBUG - Starting PDF extraction: {pdf_path}")
-        try:
-            business_pdf_text = extract_pdf_text(pdf_path)
-            print(f"✅ DEBUG - PDF extraction completed. Text length: {len(business_pdf_text)} characters")
-        except Exception as e:
-            print(f"❌ ERROR - PDF extraction failed: {e}")
-            raise
+        logger.info(f"📄 Loading PDF: {pdf_path}")
+        business_pdf_text = extract_pdf_text(pdf_path)
+        logger.info(f"✅ PDF loaded ({len(business_pdf_text)} chars)")
         
-        fit_strictness = "strict"
-        objection_focus = "trust"
-        toughness_level = 5
-        call_type = "discovery"
-        tone = "direct"
+        # Generate prospect prompt
+        logger.info("🧠 Generating prospect persona...")
+        prospect_prompt = await get_prospect_prompt(
+            "strict", "trust", 5, "discovery", "direct", business_pdf_text
+        )
+        logger.info(f"✅ Persona generated ({len(prospect_prompt)} chars)")
         
-        print("💬 DEBUG - Starting GPT prospect prompt generation...")
-        try:
-            prospect_prompt = await get_prospect_prompt(
-                fit_strictness,
-                objection_focus,
-                toughness_level,
-                call_type,
-                tone,
-                business_pdf_text,
-            )
-            print(f"✅ DEBUG - GPT prospect prompt generated. Length: {len(prospect_prompt)} characters")
-        except Exception as e:
-            print(f"❌ ERROR - GPT prompt generation failed: {e}")
-            raise
+        # Show prospect details (condensed)
+        logger.info("=" * 60)
+        # Extract just the key details for cleaner logging
+        lines = prospect_prompt.split('\n')
+        key_lines = [line for line in lines if any(keyword in line.lower() for keyword in 
+                    ['name:', 'business:', 'revenue:', 'objection:', 'tone:'])][:5]
+        for line in key_lines:
+            logger.info(f"👤 {line.strip()}")
+        logger.info("=" * 60)
         
-        print("\n🧠 GPT Persona Prompt:\n")
-        print(prospect_prompt)
-        print("\n" + "="*60 + "\n")
+        # Connect to LiveKit
+        logger.info(f"📡 Connecting to room: {room_name}")
+        await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+        logger.info("✅ Connected to LiveKit")
         
-        print(f"📡 DEBUG - Attempting to connect to LiveKit room: '{room_name}'")
-        try:
-            await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
-            print("✅ DEBUG - Successfully connected to LiveKit room")
-        except Exception as e:
-            print(f"❌ ERROR - LiveKit connection failed: {e}")
-            raise
+        # Initialize components
+        logger.info("🔧 Initializing AI components...")
         
-        print("🔧 DEBUG - Creating Agent and AgentSession with gpt-4.1-nano + Cartesia Sonic 2...")
+        agent = ProspectAgent(prospect_prompt)
         
-        try:
-            print("🔧 DEBUG - Creating ProspectAgent with instructions...")
-            agent = ProspectAgent(prospect_prompt)
-            print("✅ DEBUG - ProspectAgent created successfully")
-            
-            print("🔧 DEBUG - Creating VAD with MORE SENSITIVE settings...")
-            vad_instance = silero.VAD.load(
-                min_speech_duration=0.1,    # 🔥 MORE SENSITIVE - detect shorter speech
-                min_silence_duration=0.3,   # 🔥 SHORTER SILENCE - faster response
-                prefix_padding_duration=0.1,
-                activation_threshold=0.4,   # 🔥 LOWER THRESHOLD - easier to trigger
-            )
-            print("✅ DEBUG - VAD created successfully")
-            
-            print("🔧 DEBUG - Creating STT with Whisper...")
-            stt_instance = openai.STT(
-                model="whisper-1",
-                language="en",
-            )
-            print("✅ DEBUG - STT created successfully")
-            
-            print("🔥 DEBUG - Creating LLM with gpt-4.1-nano...")
-            llm_instance = openai.LLM(
-                model="gpt-4.1-nano",    # 🔥 ULTRA-FAST NANO MODEL
-                temperature=0.7,
-                # max_tokens handled by the model internally
-            )
-            print("✅ DEBUG - LLM created successfully")
-            
-            print("🔥 DEBUG - Creating Cartesia TTS with Sonic 2 model...")
-            tts_instance = cartesia.TTS(
-                model="sonic-2",                          # 🔥 CARTESIA SONIC 2 MODEL
-                voice="6f84f4b8-58a2-430c-8c79-688dad597532",  # 🔥 SPECIFIC VOICE ID
-                speed=1.0,
-                encoding="pcm_s16le",
-                sample_rate=24000,
-            )
-            print("✅ DEBUG - Cartesia TTS created successfully")
-            
-            print("🔧 DEBUG - Creating AgentSession with all components...")
-            session = AgentSession(
-                vad=vad_instance,
-                stt=stt_instance,
-                llm=llm_instance,
-                tts=tts_instance,
-            )
-            
-            # 🔍 ADD DEBUG EVENT HANDLERS
-            print("🔧 DEBUG - Adding event handlers for speech detection...")
-            
-            # Add MORE event handlers to catch everything
-            try:
-                @session.on("user_speech_committed")
-                def on_user_speech_committed(text: str):
-                    print(f"🎤 DEBUG - User speech committed: '{text}' (length: {len(text)})")
-                print("✅ DEBUG - user_speech_committed handler added")
-            except Exception as e:
-                print(f"❌ DEBUG - user_speech_committed handler failed: {e}")
-            
-            try:
-                @session.on("user_started_speaking")
-                def on_user_started_speaking():
-                    print("🎤 DEBUG - User started speaking (VAD triggered)")
-                print("✅ DEBUG - user_started_speaking handler added")
-            except Exception as e:
-                print(f"❌ DEBUG - user_started_speaking handler failed: {e}")
-                
-            try:
-                @session.on("user_stopped_speaking")
-                def on_user_stopped_speaking():
-                    print("🎤 DEBUG - User stopped speaking (VAD ended)")
-                print("✅ DEBUG - user_stopped_speaking handler added")
-            except Exception as e:
-                print(f"❌ DEBUG - user_stopped_speaking handler failed: {e}")
-            
-            try:
-                @session.on("agent_started_speaking")
-                def on_agent_started_speaking():
-                    print("🗣️ DEBUG - Agent started speaking")
-                print("✅ DEBUG - agent_started_speaking handler added")
-            except Exception as e:
-                print(f"❌ DEBUG - agent_started_speaking handler failed: {e}")
-                
-            try:
-                @session.on("agent_stopped_speaking") 
-                def on_agent_stopped_speaking():
-                    print("🗣️ DEBUG - Agent stopped speaking")
-                print("✅ DEBUG - agent_stopped_speaking handler added")
-            except Exception as e:
-                print(f"❌ DEBUG - agent_stopped_speaking handler failed: {e}")
-            
-            # Try alternative event names in case the above don't work
-            try:
-                @session.on("speech_recognized")
-                def on_speech_recognized(text: str):
-                    print(f"🎤 DEBUG - Speech recognized: '{text}'")
-                print("✅ DEBUG - speech_recognized handler added")
-            except Exception as e:
-                print(f"❌ DEBUG - speech_recognized handler failed: {e}")
-                
-            try:
-                @session.on("user_transcript")
-                def on_user_transcript(text: str):
-                    print(f"🎤 DEBUG - User transcript: '{text}'")
-                print("✅ DEBUG - user_transcript handler added")
-            except Exception as e:
-                print(f"❌ DEBUG - user_transcript handler failed: {e}")
-            
-            # Try even more event variations
-            try:
-                @session.on("stt_final_transcript")
-                def on_stt_final_transcript(text: str):
-                    print(f"🎤 DEBUG - STT final transcript: '{text}'")
-                print("✅ DEBUG - stt_final_transcript handler added")
-            except Exception as e:
-                print(f"❌ DEBUG - stt_final_transcript handler failed: {e}")
-                
-            try:
-                @session.on("vad_speech_start")
-                def on_vad_speech_start():
-                    print("🎤 DEBUG - VAD speech start detected")
-                print("✅ DEBUG - vad_speech_start handler added")
-            except Exception as e:
-                print(f"❌ DEBUG - vad_speech_start handler failed: {e}")
-                
-            try:
-                @session.on("vad_speech_end")
-                def on_vad_speech_end():
-                    print("🎤 DEBUG - VAD speech end detected")
-                print("✅ DEBUG - vad_speech_end handler added")
-            except Exception as e:
-                print(f"❌ DEBUG - vad_speech_end handler failed: {e}")
-            
-            # Add a generic catch-all event listener
-            try:
-                original_emit = session.emit
-                def debug_emit(event, *args, **kwargs):
-                    print(f"🔄 DEBUG - Event emitted: '{event}' with args: {args}")
-                    return original_emit(event, *args, **kwargs)
-                session.emit = debug_emit
-                print("✅ DEBUG - Generic event logger added")
-            except Exception as e:
-                print(f"❌ DEBUG - Generic event logger failed: {e}")
-            
-            print("✅ DEBUG - AgentSession created successfully")
-            
-        except Exception as e:
-            print(f"❌ ERROR - Agent/Session setup failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return
+        vad_instance = silero.VAD.load(
+            min_speech_duration=0.1,
+            min_silence_duration=0.3, 
+            prefix_padding_duration=0.1,
+            activation_threshold=0.4,
+        )
         
-        try:
-            print("🔧 DEBUG - Starting AgentSession...")
-            await session.start(agent=agent, room=ctx.room)
-            print("✅ DEBUG - AgentSession started successfully")
-            print("🔄 DEBUG - Session running - speak now and watch for VAD/STT logs...")
-            
-            # Add a heartbeat to confirm the session is active
-            async def heartbeat():
-                while True:
-                    await asyncio.sleep(10)
-                    print("💓 DEBUG - Session heartbeat - still running and listening...")
-            
-            # Start heartbeat task
-            heartbeat_task = asyncio.create_task(heartbeat())
-            print("✅ DEBUG - Heartbeat monitoring started")
-        except Exception as e:
-            print(f"❌ ERROR - AgentSession start failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return
+        stt_instance = openai.STT(model="whisper-1", language="en")
+        llm_instance = openai.LLM(model="gpt-4.1-nano", temperature=0.7)
         
-        try:
-            print("🗣️ DEBUG - Preparing to speak welcome message...")
-            await asyncio.sleep(0.5)
-            print("🗣️ DEBUG - Calling session.generate_reply() for welcome message...")
-            
-            await session.generate_reply(instructions="Greet the user by saying 'Hey! Can you hear me clearly?'")
-            
-            print("✅ DEBUG - Welcome message generate_reply() call completed")
-        except Exception as e:
-            print(f"❌ ERROR - Welcome message failed: {e}")
-            import traceback
-            traceback.print_exc()
+        tts_instance = cartesia.TTS(
+            model="sonic-2",
+            voice="6f84f4b8-58a2-430c-8c79-688dad597532",
+            speed=1.0,
+            encoding="pcm_s16le",
+            sample_rate=24000,
+        )
+        
+        session = AgentSession(
+            vad=vad_instance,
+            stt=stt_instance, 
+            llm=llm_instance,
+            tts=tts_instance,
+        )
+        
+        # Setup clean event handlers
+        conv_logger = ConversationLogger()
+        setup_session_handlers(session, conv_logger)
+        
+        logger.info("✅ Components initialized")
+        
+        # Start session
+        logger.info("🎯 Starting conversation session...")
+        await session.start(agent=agent, room=ctx.room)
+        
+        # Send welcome message
+        await asyncio.sleep(0.5)
+        await session.generate_reply(instructions="Greet the user by saying 'Hey! Can you hear me clearly?'")
+        
+        # Log session ready
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(f"🎉 Sales bot ready! (startup: {elapsed:.1f}s)")
+        logger.info("🗣️ Conversation active - user can now speak...")
+        
+        # Simple heartbeat (less frequent)
+        while True:
+            await asyncio.sleep(30)
+            logger.debug("💓 Session active")
             
     except Exception as e:
-        print(f"❌ ERROR - Entrypoint function failed: {e}")
+        logger.error(f"❌ Startup failed: {e}")
         import traceback
-        traceback.print_exc()
+        logger.error(traceback.format_exc())
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
