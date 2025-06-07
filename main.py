@@ -37,15 +37,9 @@ print(f"CARTESIA_API_KEY: {'✅ Set' if CARTESIA_API_KEY else '❌ Missing'}")
 class ProspectAgent(Agent):
     def __init__(self, prospect_prompt: str):
         super().__init__(
-            instructions=prospect_prompt,
+            instructions=prospect_prompt + "\n\nIMPORTANT: Never end the call unless explicitly asked. Stay in character and continue the conversation.",
         )
-        print("✅ DEBUG - ProspectAgent created with function tools")
-    
-    @function_tool()
-    async def end_call(self, context: RunContext, reason: str) -> str:
-        """End the current call with a reason."""
-        print(f"🔚 DEBUG - Call ended with reason: {reason}")
-        return f"Call ended: {reason}"
+        print("✅ DEBUG - ProspectAgent created without auto-end function")
 
 def fetch_token_from_supabase(session_id):
     print("🔍 DEBUG - Starting Supabase token fetch...")
