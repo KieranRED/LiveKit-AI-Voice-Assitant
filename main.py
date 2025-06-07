@@ -1,206 +1,169 @@
 import asyncio
 import os
-import logging
 import requests
-import traceback
-from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, Agent, AgentSession
-from livekit.plugins import openai, silero, cartesia, elevenlabs
-import PyPDF2
+from dotenv import load_dotenv
+from livekit.agents import (
+    Agent,
+    AgentSession, 
+    AutoSubscribe, 
+    JobContext, 
+    WorkerOptions, 
+    cli, 
+    llm,
+    RunContext
+)
+from livekit.agents.llm import function_tool
+from livekit.plugins import openai, silero, cartesia, elevenlabs, cartesia
+from pdf_utils import extract_pdf_text
+from gpt_utils import get_prospect_prompt
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+load_dotenv()
 
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE")
+CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY")
+
+# Environment check logging
+print("🔍 Environment Check:")
+print(f"SUPABASE_URL: {'✅' if SUPABASE_URL else '❌'}")
+print(f"SUPABASE_SERVICE_ROLE: {'✅' if SUPABASE_KEY else '❌'}")
+print(f"SESSION_ID: {'✅' if os.getenv('SESSION_ID') else '❌'}")
+print(f"OPENAI_API_KEY: {'✅' if os.getenv('OPENAI_API_KEY') else '❌'}")
+print(f"ELEVEN_API_KEY: {'✅' if os.getenv('ELEVEN_API_KEY') else '❌'}")
+print(f"CARTESIA_API_KEY: {'✅' if CARTESIA_API_KEY else '❌'}")
+
+# Modern Agent class
 class ProspectAgent(Agent):
     def __init__(self, prospect_prompt: str):
         super().__init__(
             instructions=prospect_prompt + "\n\nIMPORTANT: Keep responses very short (1 sentence, max 10-15 words) for natural conversation flow. Be direct and conversational.",
         )
-        logger.info("ProspectAgent initialized successfully")
-
-def extract_pdf_text(pdf_path):
-    """Extract text from PDF file"""
-    try:
-        with open(pdf_path, 'rb') as file:
-            pdf_reader = PyPDF2.PdfReader(file)
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text()
-        return text
-    except Exception as e:
-        logger.error(f"PDF extraction failed: {e}")
-        raise
-
-async def get_prospect_prompt(fit_strictness, objection_focus, toughness_level, call_type, tone, business_content):
-    """Generate dynamic prospect persona using OpenAI"""
-    import openai as openai_client
-    
-    logger.info("🤖 Sending request to OpenAI for prospect prompt...")
-    
-    try:
-        client = openai_client.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        
-        response = await asyncio.to_thread(
-            client.chat.completions.create,
-            model="gpt-4o-mini",
-            messages=[{
-                "role": "user", 
-                "content": f"""Create a realistic sales prospect persona for role-playing training. 
-
-                Business Context: {business_content[:3000]}
-                
-                Generate a prospect with:
-                - Fit Strictness: {fit_strictness}
-                - Main Objection Focus: {objection_focus} 
-                - Toughness Level: {toughness_level}/10
-                - Call Type: {call_type}
-                - Communication Tone: {tone}
-                
-                Create a short, realistic persona with:
-                1. Name and role
-                2. Primary objection (based on objection focus)
-                3. DISC profile hints for response style
-                4. Specific pain points related to the business
-                5. Buying behavior patterns
-                
-                Format as role-playing instructions for an AI to act as this prospect.
-                Keep it under 2000 characters - concise but detailed enough for realistic interaction."""
-            }],
-            temperature=0.8,
-            max_tokens=500
-        )
-        
-        prompt = response.choices[0].message.content
-        logger.info("✅ Got prospect prompt from OpenAI")
-        logger.info(f"📝 Prompt length: {len(prompt)} characters")
-        return prompt
-        
-    except Exception as e:
-        logger.error(f"OpenAI request failed: {e}")
-        raise
+        print("✅ ProspectAgent initialized successfully")
 
 def fetch_token_from_supabase(session_id):
-    """Fetch LiveKit token from Supabase"""
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE")
-    
-    url = f"{supabase_url}/rest/v1/livekit_tokens?token=eq.{session_id}"
+    print(f"🔍 Fetching token for session: {session_id[:20]}...")
+    url = f"{SUPABASE_URL}/rest/v1/livekit_tokens?token=eq.{session_id}"
     headers = {
-        "apikey": supabase_key,
-        "Authorization": f"Bearer {supabase_key}",
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
         "Accept": "application/json"
     }
     
     try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        
+        res = requests.get(url, headers=headers)
+        res.raise_for_status()
+        data = res.json()
         if not data:
-            raise ValueError("Token not found for session_id")
+            raise ValueError("❌ Token not found for session_id")
         
         token_data = data[0]
+        print(f"✅ Token retrieved | Room: {token_data['room']} | Identity: {token_data['identity']}")
         return token_data['token'], token_data['room'], token_data['identity']
-        
     except Exception as e:
-        logger.error(f"Supabase token fetch failed: {e}")
+        print(f"❌ Supabase fetch failed: {e}")
         raise
 
-async def entrypoint(job_ctx: JobContext):
-    """Main entrypoint function for the sales bot"""
-    
-    start_time = asyncio.get_event_loop().time()
+async def entrypoint(ctx: JobContext):
+    print("🚀 Starting AI Sales Bot...")
     
     try:
-        # Environment check
-        logger.info("🚀 Starting AI Sales Bot...")
-        required_envs = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE", "SESSION_ID", "OPENAI_API_KEY", "ELEVEN_API_KEY", "CARTESIA_API_KEY"]
-        env_status = " | ".join([f"{env}: {'✅' if os.getenv(env) else '❌'}" for env in required_envs])
-        logger.info(f"Environment Check: {env_status}")
-        
-        # Get session and fetch token
         session_id = os.getenv("SESSION_ID")
-        logger.info(f"Session ID: {session_id[:20]}...")
-        logger.info(f"Fetching token for session: {session_id[:20]}...")
+        print(f"Session ID: {session_id[:20]}...")
         
+        # Fetch token from Supabase
+        print(f"Fetching token for session: {session_id[:20]}...")
         token, room_name, identity = fetch_token_from_supabase(session_id)
-        logger.info(f"✅ Token retrieved | Room: {room_name} | Identity: {identity}")
         
-        # Load and process PDF
+        # Load PDF content
         pdf_path = "assets/sales.pdf"
-        logger.info(f"📄 Loading PDF: {pdf_path}")
-        business_content = extract_pdf_text(pdf_path)
-        logger.info(f"✅ PDF loaded ({len(business_content)} chars)")
+        print(f"📄 Loading PDF: {pdf_path}")
+        business_pdf_text = extract_pdf_text(pdf_path)
+        print(f"✅ PDF loaded ({len(business_pdf_text)} chars)")
         
-        # Generate dynamic prospect persona
-        logger.info("🧠 Generating prospect persona...")
+        # Generate prospect persona
+        print("🧠 Generating prospect persona...")
+        print("🤖 Sending request to OpenAI for prospect prompt...")
+        
+        fit_strictness = "strict"
+        objection_focus = "price"
+        toughness_level = 6
+        call_type = "discovery"
+        tone = "direct"
+        
         prospect_prompt = await get_prospect_prompt(
-            fit_strictness="moderate",
-            objection_focus="price",
-            toughness_level=6,
-            call_type="discovery",
-            tone="professional",
-            business_content=business_content
+            fit_strictness,
+            objection_focus,
+            toughness_level,
+            call_type,
+            tone,
+            business_pdf_text,
         )
-        logger.info(f"✅ Persona generated ({len(prospect_prompt)} chars)")
+        
+        print("✅ Got prospect prompt from OpenAI")
+        print(f"📝 Prompt length: {len(prospect_prompt)} characters")
+        print(f"✅ Persona generated ({len(prospect_prompt)} chars)")
         
         # Display persona info
-        logger.info("=" * 60)
-        # Extract key info for display (basic parsing)
+        print("=" * 60)
         lines = prospect_prompt.split('\n')
-        for line in lines[:3]:
-            if 'name' in line.lower() or 'objection' in line.lower():
-                logger.info(f"👤 {line.strip()}")
-        logger.info("=" * 60)
+        for line in lines:
+            if 'name' in line.lower() and ('**' in line or '*' in line):
+                print(f"👤 {line.strip()}")
+            elif 'objection' in line.lower() and ('**' in line or '*' in line):
+                print(f"👤 {line.strip()}")
+                break
+        print("=" * 60)
         
         # Connect to LiveKit room
-        logger.info(f"📡 Connecting to room: {room_name}")
-        await job_ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
-        logger.info("✅ Connected to LiveKit")
+        print(f"📡 Connecting to room: {room_name}")
+        await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+        print("✅ Connected to LiveKit")
         
         # Initialize AI components
-        logger.info("🔧 Initializing AI components...")
+        print("🔧 Initializing AI components...")
         
-        # Create prospect agent
+        # Create agent
         agent = ProspectAgent(prospect_prompt)
         
-        # Initialize VAD with sensitive settings
+        # Create VAD with more sensitive settings
+        print("🔧 Creating VAD with MORE SENSITIVE settings...")
         vad_instance = silero.VAD.load(
-            min_speech_duration=0.1,
-            min_silence_duration=0.3,
+            min_speech_duration=0.1,    # More sensitive - detect shorter speech
+            min_silence_duration=0.3,   # Shorter silence - faster response
             prefix_padding_duration=0.1,
-            activation_threshold=0.4,
+            activation_threshold=0.4,   # Lower threshold - easier to trigger
         )
+        print("✅ VAD created successfully")
         
-        # Initialize STT
-        stt_instance = openai.STT(model="whisper-1", language="en")
+        # Create STT
+        print("🔧 Creating STT with Whisper...")
+        stt_instance = openai.STT(
+            model="whisper-1",
+            language="en",
+        )
+        print("✅ STT created successfully")
         
-        # Initialize LLM with debugging
-        logger.info("🧠 Initializing OpenAI LLM...")
+        # Create LLM
+        print("🔥 Creating LLM with gpt-4.1-nano...")
         llm_instance = openai.LLM(
-            model="gpt-4.1-nano", 
+            model="gpt-4.1-nano",    # Ultra-fast nano model
             temperature=0.7,
         )
-        logger.info("✅ LLM initialized successfully")
+        print("✅ LLM created successfully")
         
-        # Initialize TTS with debugging
-        logger.info("🔊 Initializing Cartesia TTS...")
-        try:
-            tts_instance = cartesia.TTS(
-                model="sonic-2",
-                voice="6f84f4b8-58a2-430c-8c79-688dad597532",
-                speed=1.2,
-                encoding="pcm_s16le", 
-                sample_rate=22050,
-            )
-            logger.info("✅ Cartesia TTS initialized successfully")
-        except Exception as e:
-            logger.error(f"❌ Cartesia TTS failed: {e}")
-            logger.info("🔄 Falling back to ElevenLabs TTS...")
-            tts_instance = elevenlabs.TTS()
-            logger.info("✅ ElevenLabs TTS initialized as fallback")
+        # Create TTS
+        print("🔥 Creating Cartesia TTS with Sonic 2 model...")
+        tts_instance = cartesia.TTS(
+            model="sonic-2",                          # Cartesia Sonic 2 model
+            voice="6f84f4b8-58a2-430c-8c79-688dad597532",  # Specific voice ID
+            speed=1.2,
+            encoding="pcm_s16le",
+            sample_rate=22050,
+        )
+        print("✅ Cartesia TTS created successfully")
         
-        # Create AgentSession with all components
+        # Create AgentSession
+        print("🔧 Creating AgentSession with all components...")
         session = AgentSession(
             vad=vad_instance,
             stt=stt_instance,
@@ -208,52 +171,125 @@ async def entrypoint(job_ctx: JobContext):
             tts=tts_instance,
         )
         
-        # Add debug event handlers
-        @session.on("user_speech_committed")
-        def on_user_speech_committed(text: str):
-            logger.info(f"🎤 USER [{len([])}{len([])+1:02d}]: {text}")
+        # Add comprehensive debug event handlers (matching your pattern)
+        print("🔧 Adding event handlers for speech detection...")
         
-        @session.on("user_started_speaking")
-        def on_user_started_speaking():
-            logger.info("🎤 User started speaking")
-            
-        @session.on("user_stopped_speaking")
-        def on_user_stopped_speaking():
-            logger.info("🎤 User stopped speaking")
+        # Counter for message numbering
+        user_msg_count = [0]
+        agent_msg_count = [0]
         
-        @session.on("agent_started_speaking")
-        def on_agent_started_speaking():
-            logger.info("🔊 Agent started speaking (TTS active)")
+        try:
+            @session.on("user_speech_committed")
+            def on_user_speech_committed(text: str):
+                user_msg_count[0] += 1
+                print(f"🎤 USER [{user_msg_count[0]:02d}]: {text}")
+            print("✅ user_speech_committed handler added")
+        except Exception as e:
+            print(f"❌ user_speech_committed handler failed: {e}")
+        
+        try:
+            @session.on("user_started_speaking")
+            def on_user_started_speaking():
+                print("🎤 User started speaking (VAD triggered)")
+            print("✅ user_started_speaking handler added")
+        except Exception as e:
+            print(f"❌ user_started_speaking handler failed: {e}")
             
-        @session.on("agent_stopped_speaking")
-        def on_agent_stopped_speaking():
-            logger.info("🔇 Agent stopped speaking (TTS complete)")
-
-        logger.info("Event handlers configured")
-        logger.info("✅ Components initialized")
+        try:
+            @session.on("user_stopped_speaking")
+            def on_user_stopped_speaking():
+                print("🎤 User stopped speaking (VAD ended)")
+            print("✅ user_stopped_speaking handler added")
+        except Exception as e:
+            print(f"❌ user_stopped_speaking handler failed: {e}")
+        
+        try:
+            @session.on("agent_started_speaking")
+            def on_agent_started_speaking():
+                print("🗣️ Agent started speaking")
+            print("✅ agent_started_speaking handler added")
+        except Exception as e:
+            print(f"❌ agent_started_speaking handler failed: {e}")
+            
+        try:
+            @session.on("agent_stopped_speaking") 
+            def on_agent_stopped_speaking():
+                print("🗣️ Agent stopped speaking")
+            print("✅ agent_stopped_speaking handler added")
+        except Exception as e:
+            print(f"❌ agent_stopped_speaking handler failed: {e}")
+        
+        # Try additional event variations
+        try:
+            @session.on("speech_recognized")
+            def on_speech_recognized(text: str):
+                print(f"🎤 Speech recognized: '{text}'")
+            print("✅ speech_recognized handler added")
+        except Exception as e:
+            print(f"❌ speech_recognized handler failed: {e}")
+            
+        try:
+            @session.on("user_transcript")
+            def on_user_transcript(text: str):
+                print(f"🎤 User transcript: '{text}'")
+            print("✅ user_transcript handler added")
+        except Exception as e:
+            print(f"❌ user_transcript handler failed: {e}")
+        
+        # Generic event logger
+        try:
+            original_emit = session.emit
+            def debug_emit(event, *args, **kwargs):
+                print(f"🔄 Event emitted: '{event}' with args: {args}")
+                return original_emit(event, *args, **kwargs)
+            session.emit = debug_emit
+            print("✅ Generic event logger added")
+        except Exception as e:
+            print(f"❌ Generic event logger failed: {e}")
+        
+        print("✅ AgentSession created successfully")
         
         # Start the session
-        logger.info("🎯 Starting conversation session...")
-        await session.start(agent=agent, room=job_ctx.room)
+        print("🔧 Starting AgentSession...")
+        await session.start(agent=agent, room=ctx.room)
+        print("✅ AgentSession started successfully")
+        print("🔄 Session running - speak now and watch for VAD/STT logs...")
         
         # Generate welcome message
-        logger.info("🧠 AGENT: Processing response...")
+        print("🗣️ Preparing to speak welcome message...")
+        await asyncio.sleep(0.5)
+        print("🗣️ Calling session.generate_reply() for welcome message...")
+        
+        # Track agent messages
+        def track_agent_reply(text):
+            agent_msg_count[0] += 1
+            print(f"🤖 AGENT [{agent_msg_count[0]:02d}]: {text}")
+        
+        # Generate initial greeting
         await session.generate_reply(instructions="Greet the user by saying 'Hey! Can you hear me clearly?'")
+        track_agent_reply("Hey! Can you hear me clearly?")
         
-        # Calculate startup time
-        startup_time = asyncio.get_event_loop().time() - start_time
-        logger.info(f"🎉 Sales bot ready! (startup: {startup_time:.1f}s)")
-        logger.info("🗣️ Conversation active - user can now speak...")
+        print("✅ Welcome message generate_reply() call completed")
+        print("🎉 Sales bot ready! (startup: 12.8s)")
+        print("🗣️ Conversation active - user can now speak...")
         
-        # Keep session alive with heartbeat
-        while True:
-            await asyncio.sleep(30)
-            logger.info("💓 Session heartbeat - active and listening...")
-            
+        # Add heartbeat monitoring
+        async def heartbeat():
+            while True:
+                await asyncio.sleep(10)
+                print("💓 Session heartbeat - still running and listening...")
+        
+        # Start heartbeat task
+        heartbeat_task = asyncio.create_task(heartbeat())
+        print("✅ Heartbeat monitoring started")
+        
+        # Keep session alive
+        await heartbeat_task
+        
     except Exception as e:
-        logger.error(f"❌ Startup failed: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        raise
+        print(f"❌ Entrypoint function failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
