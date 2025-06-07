@@ -1,20 +1,25 @@
-import os
+# main.py - UPDATED WITH MODERN LIVEKIT API + DEBUG LOGGING
 import asyncio
-import json
-import PyPDF2
-from io import BytesIO
-from openai import AsyncOpenAI
-import aiohttp
+import os
+import requests
+from dotenv import load_dotenv
+from livekit.agents import (
+    Agent,
+    AgentSession, 
+    AutoSubscribe, 
+    JobContext, 
+    WorkerOptions, 
+    cli, 
+    llm,
+    RunContext
+)
+from livekit.agents.llm import function_tool
+from livekit.plugins import openai, silero, cartesia, elevenlabs, cartesia
+from pdf_utils import extract_pdf_text
+from gpt_utils import get_prospect_prompt
 
-# LiveKit imports
-import livekit
-from livekit import agents, rtc
-from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli
-from livekit.agents.voice_assistant import VoiceAssistant
-from livekit.agents.llm import ChatContext, ChatMessage
-from livekit.plugins import openai, silero, cartesia
+load_dotenv()
 
-# Environment variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE")
 CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY")
@@ -28,331 +33,241 @@ print(f"OPENAI_API_KEY: {'✅ Set' if os.getenv('OPENAI_API_KEY') else '❌ Miss
 print(f"ELEVEN_API_KEY: {'✅ Set' if os.getenv('ELEVEN_API_KEY') else '❌ Missing'}")
 print(f"CARTESIA_API_KEY: {'✅ Set' if CARTESIA_API_KEY else '❌ Missing'}")
 
-# Fetch token from Supabase
-async def fetch_supabase_token() -> str:
-    """Fetch token from Supabase using session ID"""
-    try:
-        session_id = os.getenv("SESSION_ID")
-        print(f"🔍 DEBUG - Retrieved session ID: {session_id}")
-        
-        print("🔍 DEBUG - Fetching token from Supabase...")
-        print("🔍 DEBUG - Starting Supabase token fetch...")
-        
-        url = f"{SUPABASE_URL}/rest/v1/livekit_tokens?token=eq.{session_id}"
-        headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        print(f"🔍 DEBUG - Making request to: {url}")
-        print(f"🔍 DEBUG - Headers: apikey={SUPABASE_KEY[:20]}...")
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                print(f"🔍 DEBUG - Response status: {response.status}")
-                response_text = await response.text()
-                print(f"🔍 DEBUG - Response text: {response_text[:200]}...")
-                
-                if response.status == 200:
-                    data = json.loads(response_text)
-                    if data and len(data) > 0:
-                        token_data = data[0]
-                        print(f"✅ SUCCESS - Retrieved token for room: {token_data.get('room')}, identity: {token_data.get('identity')}")
-                        print("✅ DEBUG - Token fetch successful for room: sales-room")
-                        return token_data.get('token')
-                    else:
-                        print("❌ ERROR - No token data found in response")
-                        return None
-                else:
-                    print(f"❌ ERROR - HTTP {response.status}: {response_text}")
-                    return None
-                    
-    except Exception as e:
-        print(f"❌ ERROR - Token fetch failed: {str(e)}")
-        return None
-
-# Extract PDF content
-def extract_pdf_text(pdf_path: str) -> str:
-    """Extract text from PDF file"""
-    try:
-        print(f"📄 DEBUG - Starting PDF extraction: {pdf_path}")
-        
-        with open(pdf_path, 'rb') as file:
-            pdf_reader = PyPDF2.PdfReader(file)
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text()
-        
-        print(f"✅ DEBUG - PDF extraction completed. Text length: {len(text)} characters")
-        return text
-        
-    except Exception as e:
-        print(f"❌ ERROR - PDF extraction failed: {str(e)}")
-        return ""
-
-# Generate prospect prompt using GPT
-async def generate_prospect_prompt(sales_content: str) -> str:
-    """Generate a dynamic prospect persona using GPT"""
-    try:
-        print("💬 DEBUG - Starting GPT prospect prompt generation...")
-        
-        # Initialize OpenAI client
-        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        
-        # Prospect generation prompt
-        system_prompt = f"""
-        Based on the following sales training content, create a realistic B2B prospect persona for a sales simulation.
-
-        Sales Content:
-        {sales_content[:3000]}
-
-        Create a detailed prospect profile in this exact format:
-
-        **📌 Prospect Identity**
-        **Name**: [First Last Name]
-        **Age & Location**: [Age, City, State]
-        **Business Name & Type**: [Company Name, Industry]
-        **Monthly Revenue / Team Size / Industry Stage**: [Revenue/month, # employees, stage]
-        **How they found the company**: [Discovery method]
-        **What they've consumed**: [Content/touchpoints]
-        **Lead Warmth**: [Cold/Warm/Hot]
-
-        **🧠 Mindset & Goals**
-        - Goal: [Primary business objective]
-        - Reason for considering help now: [Urgency/catalyst]
-        - Success: [What success looks like to them]
-
-        **❗ Objections & Hesitations**
-        - Objection: [Primary concern about working with you]
-        - Fears/Pain: [Underlying fears or pain points]
-        - Past experiences: [Relevant negative experiences]
-
-        **🗣️ Conversation Behavior**
-        - Behavior: [How they'll act on the call]
-        - Openness to being sold: [Receptiveness level]
-        - Tone, pace, style: [Communication style]
-
-        **💬 Example Trigger Replies (Optional)**
-        - "What are your goals?"
-        *"[Example response]"*
-        - "What stood out to you?"
-        *"[Example response]"*
-        - "What's holding you back?"
-        *"[Example response]"*
-
-        **🎯 Instruction for GPT Conversation Mode:**
-        Act as this prospect through a full discovery call. Maintain the tone, skepticism level, and behavior described. Never break character and respond as [Name] would, sticking to his motivations, objections, and style. Keep the conversation direct and trust-focused.
-
-        Make this prospect realistic, challenging (toughness level 5/10), and based on someone who would actually benefit from the sales training described.
-        """
-        
-        print("🤖 Sending request to OpenAI for prospect prompt...")
-        
-        # Generate prospect using GPT
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt}
-            ],
-            max_tokens=2000,
-            temperature=0.8
-        )
-        
-        prospect_prompt = response.choices[0].message.content
-        print("✅ Got prospect prompt from OpenAI")
-        print(f"📝 Prompt length: {len(prospect_prompt)} characters")
-        print("✅ DEBUG - GPT prospect prompt generated. Length:", len(prospect_prompt), "characters")
-        return prospect_prompt
-        
-    except Exception as e:
-        print(f"❌ ERROR - GPT prospect generation failed: {str(e)}")
-        # Fallback prospect if GPT fails
-        return """
-        **📌 Prospect Identity**
-        **Name**: Alex Johnson
-        **Age & Location**: 35, Austin, TX
-        **Business Name & Type**: TechFlow Solutions, SaaS Startup
-        **Monthly Revenue / Team Size / Industry Stage**: $50k/month, 8 employees, early stage
-        **How they found the company**: Google search
-        **What they've consumed**: Free consultation call
-        **Lead Warmth**: Warm
-
-        **🧠 Mindset & Goals**
-        Looking to scale the sales team and improve conversion rates.
-
-        **❗ Objections & Hesitations**
-        Concerned about cost and time investment.
-
-        **🗣️ Conversation Behavior**
-        Direct and to the point, skeptical but open to proven solutions.
-
-        **🎯 Instruction for GPT Conversation Mode:**
-        Act as Alex Johnson, a startup founder who is interested but cautious about sales training investments.
-        """
-
-# Modern Agent class - REMOVED the end_call function that was causing auto-hang-ups
-class ProspectAgent(agents.Agent):
+# Modern Agent class - REMOVED end_call function to prevent auto-hangups
+class ProspectAgent(Agent):
     def __init__(self, prospect_prompt: str):
         super().__init__(
             instructions=prospect_prompt + "\n\nIMPORTANT: Never end the call unless explicitly asked. Stay in character and continue the conversation.",
         )
         print("✅ DEBUG - ProspectAgent created without auto-end function")
 
-# Main entrypoint function
-@agents.entrypoint
-async def entrypoint(ctx: JobContext):
+def fetch_token_from_supabase(session_id):
+    print("🔍 DEBUG - Starting Supabase token fetch...")
+    url = f"{SUPABASE_URL}/rest/v1/livekit_tokens?token=eq.{session_id}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Accept": "application/json"
+    }
+    
+    print(f"🔍 DEBUG - Making request to: {url}")
+    print(f"🔍 DEBUG - Headers: apikey={SUPABASE_KEY[:20] if SUPABASE_KEY else 'None'}...")
+    
     try:
-        print("🚀 DEBUG - Starting entrypoint function...")
+        res = requests.get(url, headers=headers)
+        print(f"🔍 DEBUG - Response status: {res.status_code}")
+        print(f"🔍 DEBUG - Response text: {res.text[:200]}...")
         
-        # Fetch token from Supabase
-        token = await fetch_supabase_token()
-        if not token:
-            print("❌ CRITICAL - Failed to get token from Supabase!")
-            return
+        res.raise_for_status()
+        data = res.json()
+        if not data:
+            print("❌ ERROR - Token not found for session_id")
+            raise ValueError("❌ Token not found for session_id")
         
-        # Extract sales content from PDF
-        sales_content = extract_pdf_text("assets/sales.pdf")
-        if not sales_content:
-            print("❌ WARNING - No PDF content extracted, using fallback")
-            sales_content = "Sales training content about prospecting and closing deals."
+        token_data = data[0]
+        print(f"✅ SUCCESS - Retrieved token for room: {token_data['room']}, identity: {token_data['identity']}")
+        return token_data['token'], token_data['room'], token_data['identity']
+    except Exception as e:
+        print(f"❌ ERROR - Supabase fetch failed: {e}")
+        raise
+
+async def entrypoint(ctx):
+    print("🚀 DEBUG - Starting entrypoint function...")
+    
+    try:
+        session_id = os.getenv("SESSION_ID")
+        print(f"🔍 DEBUG - Retrieved session ID: {session_id}")
         
-        # Generate dynamic prospect prompt
-        prospect_prompt = await generate_prospect_prompt(sales_content)
+        print("🔍 DEBUG - Fetching token from Supabase...")
+        token, room_name, identity = fetch_token_from_supabase(session_id)
+        print(f"✅ DEBUG - Token fetch successful for room: {room_name}")
         
-        print("🧠 GPT Persona Prompt:")
+        pdf_path = "assets/sales.pdf"
+        print(f"📄 DEBUG - Starting PDF extraction: {pdf_path}")
+        try:
+            business_pdf_text = extract_pdf_text(pdf_path)
+            print(f"✅ DEBUG - PDF extraction completed. Text length: {len(business_pdf_text)} characters")
+        except Exception as e:
+            print(f"❌ ERROR - PDF extraction failed: {e}")
+            raise
+        
+        fit_strictness = "strict"
+        objection_focus = "trust"
+        toughness_level = 5
+        call_type = "discovery"
+        tone = "direct"
+        
+        print("💬 DEBUG - Starting GPT prospect prompt generation...")
+        try:
+            prospect_prompt = await get_prospect_prompt(
+                fit_strictness,
+                objection_focus,
+                toughness_level,
+                call_type,
+                tone,
+                business_pdf_text,
+            )
+            print(f"✅ DEBUG - GPT prospect prompt generated. Length: {len(prospect_prompt)} characters")
+        except Exception as e:
+            print(f"❌ ERROR - GPT prompt generation failed: {e}")
+            raise
+        
+        print("\n🧠 GPT Persona Prompt:\n")
         print(prospect_prompt)
-        print("=" * 60)
+        print("\n" + "="*60 + "\n")
         
-        # Connect to LiveKit room
-        print("📡 DEBUG - Attempting to connect to LiveKit room: 'sales-room'")
-        await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
-        print("✅ DEBUG - Successfully connected to LiveKit room")
+        print(f"📡 DEBUG - Attempting to connect to LiveKit room: '{room_name}'")
+        try:
+            await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+            print("✅ DEBUG - Successfully connected to LiveKit room")
+        except Exception as e:
+            print(f"❌ ERROR - LiveKit connection failed: {e}")
+            raise
         
         print("🔧 DEBUG - Creating Agent and AgentSession with gpt-4.1-nano + Cartesia Sonic 2...")
         
-        # Create ProspectAgent
-        print("🔧 DEBUG - Creating ProspectAgent with instructions...")
-        agent = ProspectAgent(prospect_prompt)
-        print("✅ DEBUG - ProspectAgent created successfully")
-        
-        # Create VAD with more sensitive settings
-        print("🔧 DEBUG - Creating VAD with settings...")
-        vad_instance = silero.VAD.load(
-            min_speech_duration=0.1,    # 🔥 MORE SENSITIVE
-            min_silence_duration=0.3,   # 🔥 SHORTER SILENCE
-            activation_threshold=0.4,   # 🔥 LOWER THRESHOLD
-            deactivation_threshold=0.2, # 🔥 LOWER THRESHOLD
-        )
-        print("✅ DEBUG - VAD created successfully")
-        
-        # Create STT
-        print("🔧 DEBUG - Creating STT with Whisper...")
-        stt_instance = openai.STT(model="whisper-1", language="en")
-        print("✅ DEBUG - STT created successfully")
-        
         try:
+            print("🔧 DEBUG - Creating ProspectAgent with instructions...")
+            agent = ProspectAgent(prospect_prompt)
+            print("✅ DEBUG - ProspectAgent created successfully")
+            
+            print("🔧 DEBUG - Creating VAD with MORE SENSITIVE settings...")
+            vad_instance = silero.VAD.load(
+                min_speech_duration=0.1,    # 🔥 MORE SENSITIVE - detect shorter speech
+                min_silence_duration=0.3,   # 🔥 SHORTER SILENCE - faster response
+                prefix_padding_duration=0.1,
+                activation_threshold=0.4,   # 🔥 LOWER THRESHOLD - easier to trigger
+            )
+            print("✅ DEBUG - VAD created successfully")
+            
+            print("🔧 DEBUG - Creating STT with Whisper...")
+            stt_instance = openai.STT(
+                model="whisper-1",
+                language="en",
+            )
+            print("✅ DEBUG - STT created successfully")
+            
             print("🔥 DEBUG - Creating LLM with gpt-4.1-nano...")
             llm_instance = openai.LLM(
-                model="gpt-4.1-nano",
+                model="gpt-4.1-nano",    # 🔥 ULTRA-FAST NANO MODEL
                 temperature=0.7,
+                # max_tokens handled by the model internally
             )
             print("✅ DEBUG - LLM created successfully")
             
             print("🔥 DEBUG - Creating Cartesia TTS with Sonic 2 model...")
             tts_instance = cartesia.TTS(
-                model="sonic-2",
-                voice="6f84f4b8-58a2-430c-8c79-688dad597532",
+                model="sonic-2",                          # 🔥 CARTESIA SONIC 2 MODEL
+                voice="6f84f4b8-58a2-430c-8c79-688dad597532",  # 🔥 SPECIFIC VOICE ID
                 speed=1.0,
                 encoding="pcm_s16le",
                 sample_rate=24000,
             )
             print("✅ DEBUG - Cartesia TTS created successfully")
             
+            print("🔧 DEBUG - Creating AgentSession with all components...")
+            session = AgentSession(
+                vad=vad_instance,
+                stt=stt_instance,
+                llm=llm_instance,
+                tts=tts_instance,
+            )
+            
+            # 🔍 ADD DEBUG EVENT HANDLERS
+            print("🔧 DEBUG - Adding event handlers for speech detection...")
+            
+            # Try different event handler names to see which ones work
+            try:
+                @session.on("user_speech_committed")
+                def on_user_speech_committed(text: str):
+                    print(f"🎤 DEBUG - User speech committed: '{text}' (length: {len(text)})")
+                print("✅ DEBUG - user_speech_committed handler added")
+            except Exception as e:
+                print(f"❌ DEBUG - user_speech_committed handler failed: {e}")
+            
+            try:
+                @session.on("user_started_speaking")
+                def on_user_started_speaking():
+                    print("🎤 DEBUG - User started speaking (VAD triggered)")
+                print("✅ DEBUG - user_started_speaking handler added")
+            except Exception as e:
+                print(f"❌ DEBUG - user_started_speaking handler failed: {e}")
+                
+            try:
+                @session.on("user_stopped_speaking")
+                def on_user_stopped_speaking():
+                    print("🎤 DEBUG - User stopped speaking (VAD ended)")
+                print("✅ DEBUG - user_stopped_speaking handler added")
+            except Exception as e:
+                print(f"❌ DEBUG - user_stopped_speaking handler failed: {e}")
+            
+            try:
+                @session.on("agent_started_speaking")
+                def on_agent_started_speaking():
+                    print("🗣️ DEBUG - Agent started speaking")
+                print("✅ DEBUG - agent_started_speaking handler added")
+            except Exception as e:
+                print(f"❌ DEBUG - agent_started_speaking handler failed: {e}")
+                
+            try:
+                @session.on("agent_stopped_speaking") 
+                def on_agent_stopped_speaking():
+                    print("🗣️ DEBUG - Agent stopped speaking")
+                print("✅ DEBUG - agent_stopped_speaking handler added")
+            except Exception as e:
+                print(f"❌ DEBUG - agent_stopped_speaking handler failed: {e}")
+            
+            # Try alternative event names in case the above don't work
+            try:
+                @session.on("speech_recognized")
+                def on_speech_recognized(text: str):
+                    print(f"🎤 DEBUG - Speech recognized: '{text}'")
+                print("✅ DEBUG - speech_recognized handler added")
+            except Exception as e:
+                print(f"❌ DEBUG - speech_recognized handler failed: {e}")
+                
+            try:
+                @session.on("user_transcript")
+                def on_user_transcript(text: str):
+                    print(f"🎤 DEBUG - User transcript: '{text}'")
+                print("✅ DEBUG - user_transcript handler added")
+            except Exception as e:
+                print(f"❌ DEBUG - user_transcript handler failed: {e}")
+            
+            print("✅ DEBUG - AgentSession created successfully")
+            
         except Exception as e:
             print(f"❌ ERROR - Agent/Session setup failed: {e}")
-            raise e
-        
-        # Create agent session
-        print("🔧 DEBUG - Creating AgentSession with all components...")
-        session = VoiceAssistant(
-            vad=vad_instance,
-            stt=stt_instance,
-            llm=llm_instance,
-            tts=tts_instance,
-            chat_ctx=ChatContext(
-                messages=[
-                    ChatMessage(
-                        role="system",
-                        content=prospect_prompt + "\n\nIMPORTANT: Never end the call unless explicitly asked. Stay in character and continue the conversation.",
-                    )
-                ]
-            ),
-        )
-        
-        # ADD DEBUG EVENT HANDLERS HERE
-        print("🔧 DEBUG - Adding event handlers for speech detection...")
-        
-        # Test different event handler names
-        try:
-            @session.on("user_speech_committed")
-            def on_user_speech_committed(text: str):
-                print(f"🎤 DEBUG - User speech committed: '{text}' (length: {len(text)})")
-            print("✅ DEBUG - user_speech_committed handler added")
-        except Exception as e:
-            print(f"❌ DEBUG - user_speech_committed handler failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return
         
         try:
-            @session.on("user_started_speaking")
-            def on_user_started_speaking():
-                print("🎤 DEBUG - User started speaking (VAD triggered)")
-            print("✅ DEBUG - user_started_speaking handler added")
+            print("🔧 DEBUG - Starting AgentSession...")
+            await session.start(agent=agent, room=ctx.room)
+            print("✅ DEBUG - AgentSession started successfully")
+            print("🔄 DEBUG - Session running - speak now and watch for VAD/STT logs...")
         except Exception as e:
-            print(f"❌ DEBUG - user_started_speaking handler failed: {e}")
+            print(f"❌ ERROR - AgentSession start failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return
+        
+        try:
+            print("🗣️ DEBUG - Preparing to speak welcome message...")
+            await asyncio.sleep(0.5)
+            print("🗣️ DEBUG - Calling session.generate_reply() for welcome message...")
             
-        try:
-            @session.on("user_stopped_speaking")
-            def on_user_stopped_speaking():
-                print("🎤 DEBUG - User stopped speaking (VAD ended)")
-            print("✅ DEBUG - user_stopped_speaking handler added")
-        except Exception as e:
-            print(f"❌ DEBUG - user_stopped_speaking handler failed: {e}")
-        
-        try:
-            @session.on("agent_started_speaking")
-            def on_agent_started_speaking():
-                print("🗣️ DEBUG - Agent started speaking")
-            print("✅ DEBUG - agent_started_speaking handler added")
-        except Exception as e:
-            print(f"❌ DEBUG - agent_started_speaking handler failed: {e}")
+            await session.generate_reply(instructions="Greet the user by saying 'Hey! Can you hear me clearly?'")
             
-        try:
-            @session.on("agent_stopped_speaking") 
-            def on_agent_stopped_speaking():
-                print("🗣️ DEBUG - Agent stopped speaking")
-            print("✅ DEBUG - agent_stopped_speaking handler added")
+            print("✅ DEBUG - Welcome message generate_reply() call completed")
         except Exception as e:
-            print(f"❌ DEBUG - agent_stopped_speaking handler failed: {e}")
-        
-        print("✅ DEBUG - AgentSession created successfully")
-        print("🔧 DEBUG - Starting AgentSession...")
-        session.start(ctx.room)
-        print("✅ DEBUG - AgentSession started successfully")
-        print("🔄 DEBUG - Session running - speak now and watch for VAD/STT logs...")
-        
-        # Generate welcome message
-        print("🗣️ DEBUG - Preparing to speak welcome message...")
-        welcome_response = await session.generate_reply(
-            ChatMessage(
-                role="user",
-                content="Hello"
-            )
-        )
-        print("🗣️ DEBUG - Calling session.generate_reply() for welcome message...")
-        print("✅ DEBUG - Welcome message generate_reply() call completed")
+            print(f"❌ ERROR - Welcome message failed: {e}")
+            import traceback
+            traceback.print_exc()
             
     except Exception as e:
-        print(f"❌ CRITICAL ERROR in entrypoint: {e}")
+        print(f"❌ ERROR - Entrypoint function failed: {e}")
         import traceback
         traceback.print_exc()
 
