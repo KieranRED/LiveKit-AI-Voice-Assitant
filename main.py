@@ -1,6 +1,8 @@
 import os
 import asyncio
 import json
+import PyPDF2
+from io import BytesIO
 from openai import AsyncOpenAI
 import aiohttp
 
@@ -23,6 +25,7 @@ print(f"SUPABASE_URL: {'✅ Set' if SUPABASE_URL else '❌ Missing'} - {SUPABASE
 print(f"SUPABASE_SERVICE_ROLE: {'✅ Set' if SUPABASE_KEY else '❌ Missing'} - {SUPABASE_KEY[:20] if SUPABASE_KEY else 'None'}...")
 print(f"SESSION_ID: {'✅ Set' if os.getenv('SESSION_ID') else '❌ Missing'}")
 print(f"OPENAI_API_KEY: {'✅ Set' if os.getenv('OPENAI_API_KEY') else '❌ Missing'}")
+print(f"ELEVEN_API_KEY: {'✅ Set' if os.getenv('ELEVEN_API_KEY') else '❌ Missing'}")
 print(f"CARTESIA_API_KEY: {'✅ Set' if CARTESIA_API_KEY else '❌ Missing'}")
 
 # Fetch token from Supabase
@@ -69,58 +72,24 @@ async def fetch_supabase_token() -> str:
         print(f"❌ ERROR - Token fetch failed: {str(e)}")
         return None
 
-# Extract PDF content - simplified fallback
+# Extract PDF content
 def extract_pdf_text(pdf_path: str) -> str:
-    """Extract text from PDF file - fallback to hardcoded content"""
+    """Extract text from PDF file"""
     try:
-        print(f"📄 DEBUG - PDF extraction not available, using fallback content")
+        print(f"📄 DEBUG - Starting PDF extraction: {pdf_path}")
         
-        # Hardcoded sales training content as fallback
-        fallback_content = """
-        Sales Training Content - Seven Figure Closer Program
+        with open(pdf_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            text = ""
+            for page in pdf_reader.pages:
+                text += page.extract_text()
         
-        This comprehensive sales training program covers:
-        
-        1. Prospecting and Lead Generation
-        - Cold outreach strategies
-        - LinkedIn prospecting
-        - Referral systems
-        - Content marketing for leads
-        
-        2. Discovery and Qualification
-        - Asking powerful questions
-        - Understanding pain points
-        - Budget qualification
-        - Decision maker identification
-        
-        3. Presentation and Demo
-        - Value-based selling
-        - Handling objections
-        - Creating urgency
-        - Social proof and case studies
-        
-        4. Closing Techniques
-        - Trial closes
-        - Assumptive closes
-        - Creating scarcity
-        - Follow-up strategies
-        
-        5. Account Management
-        - Upselling and cross-selling
-        - Customer retention
-        - Renewal strategies
-        - Referral generation
-        
-        Target Audience: B2B sales professionals, entrepreneurs, business owners
-        Focus: High-ticket sales, consultative selling, relationship building
-        """
-        
-        print(f"✅ DEBUG - Fallback content loaded. Text length: {len(fallback_content)} characters")
-        return fallback_content
+        print(f"✅ DEBUG - PDF extraction completed. Text length: {len(text)} characters")
+        return text
         
     except Exception as e:
-        print(f"❌ ERROR - Content extraction failed: {str(e)}")
-        return "Sales training content about prospecting, discovery, and closing deals."
+        print(f"❌ ERROR - PDF extraction failed: {str(e)}")
+        return ""
 
 # Generate prospect prompt using GPT
 async def generate_prospect_prompt(sales_content: str) -> str:
@@ -222,7 +191,7 @@ async def generate_prospect_prompt(sales_content: str) -> str:
         Act as Alex Johnson, a startup founder who is interested but cautious about sales training investments.
         """
 
-# Modern Agent class with function tools
+# Modern Agent class - REMOVED the end_call function that was causing auto-hang-ups
 class ProspectAgent(agents.Agent):
     def __init__(self, prospect_prompt: str):
         super().__init__(
@@ -242,10 +211,10 @@ async def entrypoint(ctx: JobContext):
             print("❌ CRITICAL - Failed to get token from Supabase!")
             return
         
-        # Extract sales content (using fallback)
+        # Extract sales content from PDF
         sales_content = extract_pdf_text("assets/sales.pdf")
         if not sales_content:
-            print("❌ WARNING - No content extracted, using minimal fallback")
+            print("❌ WARNING - No PDF content extracted, using fallback")
             sales_content = "Sales training content about prospecting and closing deals."
         
         # Generate dynamic prospect prompt
@@ -267,37 +236,33 @@ async def entrypoint(ctx: JobContext):
         agent = ProspectAgent(prospect_prompt)
         print("✅ DEBUG - ProspectAgent created successfully")
         
-        # Create VAD with more sensitive settings and logging
+        # Create VAD with more sensitive settings
         print("🔧 DEBUG - Creating VAD with settings...")
         vad_instance = silero.VAD.load(
-            min_speech_duration=0.1,    # 🔥 MORE SENSITIVE - detect shorter speech
-            min_silence_duration=0.3,   # 🔥 SHORTER SILENCE - faster response  
-            activation_threshold=0.4,   # 🔥 LOWER THRESHOLD - easier to trigger
-            deactivation_threshold=0.2, # 🔥 LOWER THRESHOLD - easier to trigger
+            min_speech_duration=0.1,    # 🔥 MORE SENSITIVE
+            min_silence_duration=0.3,   # 🔥 SHORTER SILENCE
+            activation_threshold=0.4,   # 🔥 LOWER THRESHOLD
+            deactivation_threshold=0.2, # 🔥 LOWER THRESHOLD
         )
         print("✅ DEBUG - VAD created successfully")
         
-        # Create STT with logging
+        # Create STT
         print("🔧 DEBUG - Creating STT with Whisper...")
-        stt_instance = openai.STT(
-            model="whisper-1",
-            language="en",
-        )
+        stt_instance = openai.STT(model="whisper-1", language="en")
         print("✅ DEBUG - STT created successfully")
         
         try:
             print("🔥 DEBUG - Creating LLM with gpt-4.1-nano...")
             llm_instance = openai.LLM(
-                model="gpt-4.1-nano",    # 🔥 ULTRA-FAST NANO MODEL
+                model="gpt-4.1-nano",
                 temperature=0.7,
-                # max_tokens handled by the model internally
             )
             print("✅ DEBUG - LLM created successfully")
             
             print("🔥 DEBUG - Creating Cartesia TTS with Sonic 2 model...")
             tts_instance = cartesia.TTS(
-                model="sonic-2",                          # 🔥 CARTESIA SONIC 2 MODEL
-                voice="6f84f4b8-58a2-430c-8c79-688dad597532",  # 🔥 SPECIFIC VOICE ID
+                model="sonic-2",
+                voice="6f84f4b8-58a2-430c-8c79-688dad597532",
                 speed=1.0,
                 encoding="pcm_s16le",
                 sample_rate=24000,
@@ -308,7 +273,7 @@ async def entrypoint(ctx: JobContext):
             print(f"❌ ERROR - Agent/Session setup failed: {e}")
             raise e
         
-        # Create agent session with detailed logging
+        # Create agent session
         print("🔧 DEBUG - Creating AgentSession with all components...")
         session = VoiceAssistant(
             vad=vad_instance,
@@ -325,25 +290,25 @@ async def entrypoint(ctx: JobContext):
             ),
         )
         
-        print("🔧 DEBUG - Adding event handlers...")
+        # ADD DEBUG EVENT HANDLERS HERE
+        print("🔧 DEBUG - Adding event handlers for speech detection...")
         
-        # Try multiple event handler approaches
+        # Test different event handler names
         try:
             @session.on("user_speech_committed")
             def on_user_speech_committed(text: str):
-                print(f"🎤 DEBUG - User speech committed: '{text}'")
-                print(f"🎤 DEBUG - Text length: {len(text)} characters")
+                print(f"🎤 DEBUG - User speech committed: '{text}' (length: {len(text)})")
             print("✅ DEBUG - user_speech_committed handler added")
         except Exception as e:
-            print(f"❌ DEBUG - Failed to add user_speech_committed handler: {e}")
+            print(f"❌ DEBUG - user_speech_committed handler failed: {e}")
         
         try:
             @session.on("user_started_speaking")
             def on_user_started_speaking():
-                print("🎤 DEBUG - User started speaking (VAD detected)")
+                print("🎤 DEBUG - User started speaking (VAD triggered)")
             print("✅ DEBUG - user_started_speaking handler added")
         except Exception as e:
-            print(f"❌ DEBUG - Failed to add user_started_speaking handler: {e}")
+            print(f"❌ DEBUG - user_started_speaking handler failed: {e}")
             
         try:
             @session.on("user_stopped_speaking")
@@ -351,7 +316,7 @@ async def entrypoint(ctx: JobContext):
                 print("🎤 DEBUG - User stopped speaking (VAD ended)")
             print("✅ DEBUG - user_stopped_speaking handler added")
         except Exception as e:
-            print(f"❌ DEBUG - Failed to add user_stopped_speaking handler: {e}")
+            print(f"❌ DEBUG - user_stopped_speaking handler failed: {e}")
         
         try:
             @session.on("agent_started_speaking")
@@ -359,7 +324,7 @@ async def entrypoint(ctx: JobContext):
                 print("🗣️ DEBUG - Agent started speaking")
             print("✅ DEBUG - agent_started_speaking handler added")
         except Exception as e:
-            print(f"❌ DEBUG - Failed to add agent_started_speaking handler: {e}")
+            print(f"❌ DEBUG - agent_started_speaking handler failed: {e}")
             
         try:
             @session.on("agent_stopped_speaking") 
@@ -367,49 +332,24 @@ async def entrypoint(ctx: JobContext):
                 print("🗣️ DEBUG - Agent stopped speaking")
             print("✅ DEBUG - agent_stopped_speaking handler added")
         except Exception as e:
-            print(f"❌ DEBUG - Failed to add agent_stopped_speaking handler: {e}")
-        
-        # Try alternative event names
-        try:
-            @session.on("speech_recognized")
-            def on_speech_recognized(text: str):
-                print(f"🎤 DEBUG - Speech recognized: '{text}'")
-            print("✅ DEBUG - speech_recognized handler added")
-        except Exception as e:
-            print(f"❌ DEBUG - Failed to add speech_recognized handler: {e}")
-            
-        try:
-            @session.on("user_transcript")
-            def on_user_transcript(text: str):
-                print(f"🎤 DEBUG - User transcript: '{text}'")
-            print("✅ DEBUG - user_transcript handler added")
-        except Exception as e:
-            print(f"❌ DEBUG - Failed to add user_transcript handler: {e}")
+            print(f"❌ DEBUG - agent_stopped_speaking handler failed: {e}")
         
         print("✅ DEBUG - AgentSession created successfully")
         print("🔧 DEBUG - Starting AgentSession...")
         session.start(ctx.room)
         print("✅ DEBUG - AgentSession started successfully")
+        print("🔄 DEBUG - Session running - speak now and watch for VAD/STT logs...")
         
-        # Add a simple periodic log to show the session is running
-        print("🔄 DEBUG - Session is now running and waiting for audio input...")
-        print("🎤 DEBUG - Make sure your microphone is working and speak clearly...")
-        
-        # Generate welcome message with debugging
+        # Generate welcome message
         print("🗣️ DEBUG - Preparing to speak welcome message...")
-        try:
-            welcome_response = await session.generate_reply(
-                ChatMessage(
-                    role="user",
-                    content="Hello"
-                )
+        welcome_response = await session.generate_reply(
+            ChatMessage(
+                role="user",
+                content="Hello"
             )
-            print("🗣️ DEBUG - Calling session.generate_reply() for welcome message...")
-            print("✅ DEBUG - Welcome message generate_reply() call completed")
-        except Exception as e:
-            print(f"❌ DEBUG - Error generating welcome message: {e}")
-            # Fallback - just wait for user input
-            print("🔄 DEBUG - Continuing without welcome message...")
+        )
+        print("🗣️ DEBUG - Calling session.generate_reply() for welcome message...")
+        print("✅ DEBUG - Welcome message generate_reply() call completed")
             
     except Exception as e:
         print(f"❌ CRITICAL ERROR in entrypoint: {e}")
