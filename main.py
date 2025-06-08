@@ -124,64 +124,41 @@ async def entrypoint(ctx: JobContext):
             tts=tts_instance,
         )
         
-        # Add voice event handlers - let's try different event names
+        # Add voice event handlers using the correct event names for LiveKit 1.0.23
         conversation_count = [0]
         
-        # Try the exact events from your working example first
+        @session.on("speech_created")
+        def on_speech_created(event):
+            if hasattr(event, 'source'):
+                if event.source == 'generate_reply':
+                    # This is bot speech
+                    conversation_count[0] += 1
+                    print(f"🤖 BOT SPEAKING [{conversation_count[0]:02d}]")
+                elif event.source == 'user':
+                    # This is user speech  
+                    print(f"🎤 USER SPEAKING")
+                else:
+                    print(f"🔊 SPEECH: {event.source}")
+        
+        # Try to capture user input events with different possible names
         try:
-            @session.on("user_speech_committed")
-            def on_user_speech(msg):
-                print(f"🎤 USER SAID: {msg.content}")
-        except:
-            # Fallback to simple text parameter
-            @session.on("user_speech_committed")
-            def on_user_speech_simple(text):
+            @session.on("user_transcript")
+            def on_user_transcript(text):
                 print(f"🎤 USER SAID: {text}")
-            
-        try:
-            @session.on("agent_speech_committed") 
-            def on_agent_speech(msg):
-                conversation_count[0] += 1
-                print(f"🤖 BOT SAID [{conversation_count[0]:02d}]: {msg.content}")
         except:
             pass
             
         try:
-            @session.on("user_started_speaking")
-            def on_user_start():
-                print("🎤 User started speaking...")
-        except:
-            pass
-            
-        try:
-            @session.on("user_stopped_speaking")
-            def on_user_stop():
-                print("🎤 User stopped speaking.")
-        except:
-            pass
-            
-        try:
-            @session.on("agent_started_speaking")
-            def on_agent_start():
-                print("🤖 Bot started speaking...")
-        except:
-            pass
-            
-        try:
-            @session.on("agent_stopped_speaking")
-            def on_agent_stop(): 
-                print("🤖 Bot stopped speaking.")
+            @session.on("transcript")
+            def on_transcript(event):
+                if hasattr(event, 'text') and hasattr(event, 'participant'):
+                    if event.participant != 'assistant':
+                        print(f"🎤 USER SAID: {event.text}")
         except:
             pass
         
-        # Add a debug logger to see what events actually get fired
-        print("🔧 Adding event debug logger...")
-        original_emit = session.emit
-        def debug_emit(event, *args, **kwargs):
-            if 'speech' in event or 'speaking' in event:
-                print(f"🔄 SPEECH EVENT: '{event}' args: {args}")
-            return original_emit(event, *args, **kwargs)
-        session.emit = debug_emit
+        # Remove the debug logger since we found what we need
+        print("🔧 Speech event handlers added")
         
         # Start session
         print("🔧 Starting session...")
