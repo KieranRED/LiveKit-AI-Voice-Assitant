@@ -127,12 +127,10 @@ async def entrypoint(ctx: JobContext):
         # Add essential event handlers
         conversation_count = [0]
         
-        # User speech events
         @session.on("user_speech_committed")
         def on_user_speech_committed(text: str):
             print(f"👤 USER: {text}")
         
-        # Try different event names for speech state
         @session.on("user_started_speaking")
         def on_user_started_speaking():
             print("🎤 User started speaking")
@@ -148,38 +146,13 @@ async def entrypoint(ctx: JobContext):
         @session.on("agent_stopped_speaking") 
         def on_agent_stopped_speaking():
             print("🗣️ Agent stopped speaking")
-            
-        # Alternative event names to try
-        @session.on("user_state_changed")
-        def on_user_state_changed(event):
-            print(f"🎤 User state: {event}")
-            
-        @session.on("agent_state_changed")
-        def on_agent_state_changed(event):
-            print(f"🗣️ Agent state: {event}")
         
         @session.on("conversation_item_added")
         def on_conversation_item_added(item):
-            if hasattr(item, 'role'):
-                if item.role == 'assistant':
-                    conversation_count[0] += 1
-                    content = item.content[0] if item.content else "No content"
-                    print(f"🤖 AGENT [{conversation_count[0]:02d}]: {content}")
-                elif item.role == 'user':
-                    content = item.content[0] if item.content else "No content"
-                    print(f"👤 USER: {content}")
-        
-        # Debug: Log speech events to see what's available
-        print("🔧 Adding debug event logger...")
-        try:
-            original_emit = session.emit
-            def debug_emit(event, *args, **kwargs):
-                if event in ["user_started_speaking", "user_stopped_speaking", "agent_started_speaking", "agent_stopped_speaking", "user_state_changed", "agent_state_changed"]:
-                    print(f"🔄 Speech Event: '{event}' with args: {args}")
-                return original_emit(event, *args, **kwargs)
-            session.emit = debug_emit
-        except Exception as e:
-            print(f"❌ Debug logger failed: {e}")
+            if hasattr(item, 'role') and item.role == 'assistant':
+                conversation_count[0] += 1
+                content = item.content[0] if item.content else "No content"
+                print(f"🤖 AGENT [{conversation_count[0]:02d}]: {content}")
         
         # Start session
         print("🔧 Starting session...")
