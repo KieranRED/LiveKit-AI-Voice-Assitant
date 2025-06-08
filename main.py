@@ -124,33 +124,64 @@ async def entrypoint(ctx: JobContext):
             tts=tts_instance,
         )
         
-        # Add voice event handlers  
+        # Add voice event handlers - let's try different event names
         conversation_count = [0]
         
-        @session.on("user_speech_committed")
-        def on_user_speech(msg):
-            print(f"🎤 USER SAID: {msg.content}")
+        # Try the exact events from your working example first
+        try:
+            @session.on("user_speech_committed")
+            def on_user_speech(msg):
+                print(f"🎤 USER SAID: {msg.content}")
+        except:
+            # Fallback to simple text parameter
+            @session.on("user_speech_committed")
+            def on_user_speech_simple(text):
+                print(f"🎤 USER SAID: {text}")
             
-        @session.on("agent_speech_committed") 
-        def on_agent_speech(msg):
-            conversation_count[0] += 1
-            print(f"🤖 BOT SAID [{conversation_count[0]:02d}]: {msg.content}")
+        try:
+            @session.on("agent_speech_committed") 
+            def on_agent_speech(msg):
+                conversation_count[0] += 1
+                print(f"🤖 BOT SAID [{conversation_count[0]:02d}]: {msg.content}")
+        except:
+            pass
             
-        @session.on("user_started_speaking")
-        def on_user_start():
-            print("🎤 User started speaking...")
+        try:
+            @session.on("user_started_speaking")
+            def on_user_start():
+                print("🎤 User started speaking...")
+        except:
+            pass
             
-        @session.on("user_stopped_speaking")
-        def on_user_stop():
-            print("🎤 User stopped speaking.")
+        try:
+            @session.on("user_stopped_speaking")
+            def on_user_stop():
+                print("🎤 User stopped speaking.")
+        except:
+            pass
             
-        @session.on("agent_started_speaking")
-        def on_agent_start():
-            print("🤖 Bot started speaking...")
+        try:
+            @session.on("agent_started_speaking")
+            def on_agent_start():
+                print("🤖 Bot started speaking...")
+        except:
+            pass
             
-        @session.on("agent_stopped_speaking")
-        def on_agent_stop(): 
-            print("🤖 Bot stopped speaking.")
+        try:
+            @session.on("agent_stopped_speaking")
+            def on_agent_stop(): 
+                print("🤖 Bot stopped speaking.")
+        except:
+            pass
+        
+        # Add a debug logger to see what events actually get fired
+        print("🔧 Adding event debug logger...")
+        original_emit = session.emit
+        def debug_emit(event, *args, **kwargs):
+            if 'speech' in event or 'speaking' in event:
+                print(f"🔄 SPEECH EVENT: '{event}' args: {args}")
+            return original_emit(event, *args, **kwargs)
+        session.emit = debug_emit
         
         # Start session
         print("🔧 Starting session...")
