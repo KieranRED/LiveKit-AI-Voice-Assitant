@@ -36,7 +36,7 @@ print(f"CARTESIA_API_KEY: {'✅' if CARTESIA_API_KEY else '❌'}")
 class ProspectAgent(Agent):
     def __init__(self, prospect_prompt: str):
         super().__init__(
-            instructions=prospect_prompt + "\n\nIMPORTANT: Never end the call unless explicitly asked. Stay in character and continue the conversation.",
+            instructions=prospect_prompt + "\n\nYou must act as the prospect and the user will try to close you. Stay in character no matter what never break character and continue the conversation.",
         )
 
 def fetch_token_from_supabase(session_id):
