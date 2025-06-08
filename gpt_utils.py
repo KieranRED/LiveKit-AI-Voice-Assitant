@@ -169,14 +169,17 @@ async def entrypoint(ctx: JobContext):
                     content = item.content[0] if item.content else "No content"
                     print(f"👤 USER: {content}")
         
-        # Debug: Log ALL events to see what's available
+        # Debug: Log speech events to see what's available
         print("🔧 Adding debug event logger...")
-        original_emit = session.emit
-        def debug_emit(event, *args, **kwargs):
-            if event in ["user_started_speaking", "user_stopped_speaking", "agent_started_speaking", "agent_stopped_speaking", "user_state_changed", "agent_state_changed"]:
-                print(f"🔄 Speech Event: '{event}' with args: {args}")
-            return original_emit(event, *args, **kwargs)
-        session.emit = debug_emit
+        try:
+            original_emit = session.emit
+            def debug_emit(event, *args, **kwargs):
+                if event in ["user_started_speaking", "user_stopped_speaking", "agent_started_speaking", "agent_stopped_speaking", "user_state_changed", "agent_state_changed"]:
+                    print(f"🔄 Speech Event: '{event}' with args: {args}")
+                return original_emit(event, *args, **kwargs)
+            session.emit = debug_emit
+        except Exception as e:
+            print(f"❌ Debug logger failed: {e}")
         
         # Start session
         print("🔧 Starting session...")
