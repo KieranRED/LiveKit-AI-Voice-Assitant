@@ -140,24 +140,16 @@ async def entrypoint(ctx: JobContext):
                 else:
                     print(f"🔊 SPEECH: {event.source}")
         
-        # Try to capture user input events with different possible names
-        try:
-            @session.on("user_transcript")
-            def on_user_transcript(text):
-                print(f"🎤 USER SAID: {text}")
-        except:
-            pass
-            
-        try:
-            @session.on("transcript")
-            def on_transcript(event):
-                if hasattr(event, 'text') and hasattr(event, 'participant'):
-                    if event.participant != 'assistant':
-                        print(f"🎤 USER SAID: {event.text}")
-        except:
-            pass
+        # Add a comprehensive debug logger to catch ALL events
+        print("🔧 Adding comprehensive event debug logger...")
+        original_emit = session.emit
+        def debug_emit(event, *args, **kwargs):
+            # Log ALL events to see what's available
+            if any(keyword in event.lower() for keyword in ['user', 'transcript', 'audio', 'speech', 'voice', 'message']):
+                print(f"🔄 EVENT: '{event}' args: {args[:1] if args else 'none'}")  # Only show first arg to avoid spam
+            return original_emit(event, *args, **kwargs)
+        session.emit = debug_emit
         
-        # Remove the debug logger since we found what we need
         print("🔧 Speech event handlers added")
         
         # Start session
