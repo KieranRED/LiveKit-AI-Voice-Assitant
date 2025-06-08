@@ -124,12 +124,28 @@ async def entrypoint(ctx: JobContext):
             tts=tts_instance,
         )
         
-        # Add only essential event handlers
+        # Add essential event handlers
         conversation_count = [0]
         
         @session.on("user_speech_committed")
         def on_user_speech_committed(text: str):
             print(f"👤 USER: {text}")
+        
+        @session.on("user_started_speaking")
+        def on_user_started_speaking():
+            print("🎤 User started speaking")
+            
+        @session.on("user_stopped_speaking")
+        def on_user_stopped_speaking():
+            print("🎤 User stopped speaking")
+        
+        @session.on("agent_started_speaking")
+        def on_agent_started_speaking():
+            print("🗣️ Agent started speaking")
+            
+        @session.on("agent_stopped_speaking") 
+        def on_agent_stopped_speaking():
+            print("🗣️ Agent stopped speaking")
         
         @session.on("conversation_item_added")
         def on_conversation_item_added(item):
