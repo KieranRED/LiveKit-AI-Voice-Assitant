@@ -124,19 +124,33 @@ async def entrypoint(ctx: JobContext):
             tts=tts_instance,
         )
         
-        # Add only essential event handlers
+        # Add voice event handlers using agent instead of session
         conversation_count = [0]
         
-        @session.on("user_speech_committed")
-        def on_user_speech_committed(text: str):
-            print(f"👤 USER: {text}")
-        
-        @session.on("conversation_item_added")
-        def on_conversation_item_added(item):
-            if hasattr(item, 'role') and item.role == 'assistant':
-                conversation_count[0] += 1
-                content = item.content[0] if item.content else "No content"
-                print(f"🤖 AGENT [{conversation_count[0]:02d}]: {content}")
+        @agent.on("user_speech_committed")
+        def on_user_speech(msg):
+            print(f"🎤 USER SAID: {msg.content}")
+            
+        @agent.on("agent_speech_committed") 
+        def on_agent_speech(msg):
+            conversation_count[0] += 1
+            print(f"🤖 BOT SAID [{conversation_count[0]:02d}]: {msg.content}")
+            
+        @agent.on("user_started_speaking")
+        def on_user_start():
+            print("🎤 User started speaking...")
+            
+        @agent.on("user_stopped_speaking")
+        def on_user_stop():
+            print("🎤 User stopped speaking.")
+            
+        @agent.on("agent_started_speaking")
+        def on_agent_start():
+            print("🤖 Bot started speaking...")
+            
+        @agent.on("agent_stopped_speaking")
+        def on_agent_stop(): 
+            print("🤖 Bot stopped speaking.")
         
         # Start session
         print("🔧 Starting session...")
