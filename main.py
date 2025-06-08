@@ -134,21 +134,19 @@ async def entrypoint(ctx: JobContext):
                     # This is bot speech
                     conversation_count[0] += 1
                     print(f"🤖 BOT SPEAKING [{conversation_count[0]:02d}]")
-                elif event.source == 'user':
-                    # This is user speech  
-                    print(f"🎤 USER SPEAKING")
-                else:
-                    print(f"🔊 SPEECH: {event.source}")
         
-        # Add a comprehensive debug logger to catch ALL events
-        print("🔧 Adding comprehensive event debug logger...")
-        original_emit = session.emit
-        def debug_emit(event, *args, **kwargs):
-            # Log ALL events to see what's available
-            if any(keyword in event.lower() for keyword in ['user', 'transcript', 'audio', 'speech', 'voice', 'message']):
-                print(f"🔄 EVENT: '{event}' args: {args[:1] if args else 'none'}")  # Only show first arg to avoid spam
-            return original_emit(event, *args, **kwargs)
-        session.emit = debug_emit
+        @session.on("user_state_changed")
+        def on_user_state_changed(event):
+            if hasattr(event, 'new_state'):
+                if event.new_state == 'speaking':
+                    print("🎤 User started speaking...")
+                elif event.new_state == 'listening' and hasattr(event, 'old_state') and event.old_state == 'speaking':
+                    print("🎤 User stopped speaking.")
+        
+        @session.on("user_input_transcribed") 
+        def on_user_input_transcribed(event):
+            if hasattr(event, 'transcript') and hasattr(event, 'is_final') and event.is_final:
+                print(f"🎤 USER SAID: {event.transcript}")
         
         print("🔧 Speech event handlers added")
         
