@@ -17,11 +17,12 @@ from livekit.agents.llm import function_tool
 from livekit.plugins import openai, silero
 from pdf_utils import extract_pdf_text
 from gpt_utils import get_prospect_prompt
+import openai as openai_client  # Import OpenAI client directly
 
 async def generate_voice_instructions(prospect_prompt: str) -> str:
     """Generate TTS voice instructions based on prospect personality"""
     try:
-        client = openai.AsyncOpenAI()
+        client = openai_client.AsyncOpenAI()  # Use direct OpenAI client
         
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
@@ -38,9 +39,8 @@ Generate 2-3 sentences describing how this person would sound when speaking. Foc
 - Tone (confident/hesitant/friendly/professional/casual)
 - Accent or regional speaking style if mentioned
 - Personality traits that affect speech
-- Base on DISC type
-- Speach should alwasy be emotive
-"
+
+Example: "Speak with a confident, fast-paced tone like a busy entrepreneur. Use a slightly elevated energy level with clear articulation. Sound professional but approachable."
 
 Voice instructions:"""
             }],
@@ -148,17 +148,16 @@ async def entrypoint(ctx: JobContext):
         
         stt_instance = openai.STT(model="whisper-1", language="en")
         
-        # Optimize LLM for faster responses
+        # Optimize LLM for faster responses - removed max_tokens parameter
         llm_instance = openai.LLM(
             model="gpt-4.1-nano",  # Keeping the faster model as requested
             temperature=0.7,
-            max_tokens=150,  # Limit response length for faster generation
         )
         
         # CHANGED: Using OpenAI GPT-4o Mini TTS with voice instructions
         tts_instance = openai.TTS(
             model="gpt-4o-mini-tts",
-            voice="nova",  # Options: alloy, echo, fable, onyx, nova, shimmer
+            voice="alloy",  # Options: alloy, echo, fable, onyx, nova, shimmer
             instructions=voice_instructions,
         )
         
