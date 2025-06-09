@@ -1,4 +1,4 @@
-# main.py - CLEANED UP VERSION WITH MINIMAL LOGGING
+# main.py - CLEANED UP VERSION WITH MINIMAL LOGGING - Cartesia Works
 import asyncio
 import os
 import requests
@@ -63,7 +63,7 @@ def fetch_token_from_supabase(session_id):
         raise
 
 async def entrypoint(ctx: JobContext):
-    print("🚀 Starting AI Sales Bot...")
+    print("🚀 Starting AI Sales Bot... ")
     
     try:
         session_id = os.getenv("SESSION_ID")
