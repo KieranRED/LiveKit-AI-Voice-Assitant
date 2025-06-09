@@ -38,8 +38,9 @@ Generate 2-3 sentences describing how this person would sound when speaking. Foc
 - Tone (confident/hesitant/friendly/professional/casual)
 - Accent or regional speaking style if mentioned
 - Personality traits that affect speech
-
-Example: "Speak with a confident, fast-paced tone like a busy entrepreneur. Use a slightly elevated energy level with clear articulation. Sound professional but approachable."
+- Base on DISC type
+- Speach should alwasy be emotive
+"
 
 Voice instructions:"""
             }],
@@ -139,19 +140,25 @@ async def entrypoint(ctx: JobContext):
         agent = ProspectAgent(prospect_prompt)
         
         vad_instance = silero.VAD.load(
-            min_speech_duration=0.1,
-            min_silence_duration=0.3,
-            prefix_padding_duration=0.1,
-            activation_threshold=0.4,
+            min_speech_duration=0.05,  # Reduced from 0.1 - detect speech faster
+            min_silence_duration=0.15,  # Reduced from 0.3 - shorter silence before stopping
+            prefix_padding_duration=0.05,  # Reduced from 0.1 - less padding
+            activation_threshold=0.3,  # Reduced from 0.4 - more sensitive
         )
         
         stt_instance = openai.STT(model="whisper-1", language="en")
-        llm_instance = openai.LLM(model="gpt-4.1-nano", temperature=0.7)
+        
+        # Optimize LLM for faster responses
+        llm_instance = openai.LLM(
+            model="gpt-4.1-nano",  # Keeping the faster model as requested
+            temperature=0.7,
+            max_tokens=150,  # Limit response length for faster generation
+        )
         
         # CHANGED: Using OpenAI GPT-4o Mini TTS with voice instructions
         tts_instance = openai.TTS(
             model="gpt-4o-mini-tts",
-            voice="alloy",  # Options: alloy, echo, fable, onyx, nova, shimmer
+            voice="nova",  # Options: alloy, echo, fable, onyx, nova, shimmer
             instructions=voice_instructions,
         )
         
@@ -163,8 +170,9 @@ async def entrypoint(ctx: JobContext):
             tts=tts_instance,
         )
         
-        # Add voice event handlers using the correct event names for LiveKit 1.0.23
+        # Add voice event handlers with timing diagnostics
         conversation_count = [0]
+        last_speech_end_time = [None]
         
         @session.on("speech_created")
         def on_speech_created(event):
@@ -172,7 +180,11 @@ async def entrypoint(ctx: JobContext):
                 if event.source == 'generate_reply':
                     # This is bot speech
                     conversation_count[0] += 1
-                    print(f"🤖 BOT SPEAKING [{conversation_count[0]:02d}]")
+                    if last_speech_end_time[0]:
+                        delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
+                        print(f"🤖 BOT SPEAKING [{conversation_count[0]:02d}] (delay: {delay:.2f}s)")
+                    else:
+                        print(f"🤖 BOT SPEAKING [{conversation_count[0]:02d}]")
         
         @session.on("user_state_changed")
         def on_user_state_changed(event):
@@ -180,12 +192,17 @@ async def entrypoint(ctx: JobContext):
                 if event.new_state == 'speaking':
                     print("🎤 User started speaking...")
                 elif event.new_state == 'listening' and hasattr(event, 'old_state') and event.old_state == 'speaking':
+                    last_speech_end_time[0] = asyncio.get_event_loop().time()
                     print("🎤 User stopped speaking.")
         
         @session.on("user_input_transcribed") 
         def on_user_input_transcribed(event):
             if hasattr(event, 'transcript') and hasattr(event, 'is_final') and event.is_final:
-                print(f"🎤 USER SAID: {event.transcript}")
+                if last_speech_end_time[0]:
+                    stt_delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
+                    print(f"🎤 USER SAID: {event.transcript} (STT delay: {stt_delay:.2f}s)")
+                else:
+                    print(f"🎤 USER SAID: {event.transcript}")
         
         print("🔧 Speech event handlers added")
         
