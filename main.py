@@ -1,4 +1,4 @@
-# main.py - CLEANED UP VERSION WITH MINIMAL LOGGING - Cartesia Works
+# main.py - UPDATED WITH OPENAI TTS
 import asyncio
 import os
 import requests
@@ -14,24 +14,58 @@ from livekit.agents import (
     RunContext
 )
 from livekit.agents.llm import function_tool
-from livekit.plugins import openai, silero, cartesia, elevenlabs, cartesia
+from livekit.plugins import openai, silero
 from pdf_utils import extract_pdf_text
 from gpt_utils import get_prospect_prompt
+
+async def generate_voice_instructions(prospect_prompt: str) -> str:
+    """Generate TTS voice instructions based on prospect personality"""
+    try:
+        client = openai.AsyncOpenAI()
+        
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user", 
+                "content": f"""Based on this prospect persona, generate concise voice instructions for a text-to-speech system. The instructions should describe how this person would speak - their tone, pace, energy level, accent, and speaking style.
+
+PROSPECT PERSONA:
+{prospect_prompt}
+
+Generate 2-3 sentences describing how this person would sound when speaking. Focus on:
+- Speaking pace (fast/slow/moderate)
+- Energy level (high/low/calm/energetic) 
+- Tone (confident/hesitant/friendly/professional/casual)
+- Accent or regional speaking style if mentioned
+- Personality traits that affect speech
+
+Example: "Speak with a confident, fast-paced tone like a busy entrepreneur. Use a slightly elevated energy level with clear articulation. Sound professional but approachable."
+
+Voice instructions:"""
+            }],
+            temperature=0.7,
+            max_tokens=150
+        )
+        
+        voice_instructions = response.choices[0].message.content.strip()
+        print(f"🎭 Voice instructions: {voice_instructions}")
+        return voice_instructions
+        
+    except Exception as e:
+        print(f"⚠️ Failed to generate voice instructions: {e}")
+        return "Speak in a natural, conversational tone with moderate pace and energy."
 
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE")
-CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY")
 
-# Minimal environment check
+# Environment check - removed Cartesia and ElevenLabs
 print("🔍 Environment Check:")
 print(f"SUPABASE_URL: {'✅' if SUPABASE_URL else '❌'}")
 print(f"SUPABASE_SERVICE_ROLE: {'✅' if SUPABASE_KEY else '❌'}")
 print(f"SESSION_ID: {'✅' if os.getenv('SESSION_ID') else '❌'}")
 print(f"OPENAI_API_KEY: {'✅' if os.getenv('OPENAI_API_KEY') else '❌'}")
-print(f"ELEVEN_API_KEY: {'✅' if os.getenv('ELEVEN_API_KEY') else '❌'}")
-print(f"CARTESIA_API_KEY: {'✅' if CARTESIA_API_KEY else '❌'}")
 
 class ProspectAgent(Agent):
     def __init__(self, prospect_prompt: str):
@@ -80,6 +114,10 @@ async def entrypoint(ctx: JobContext):
             "strict", "trust", 5, "discovery", "direct", business_pdf_text
         )
         
+        # Generate TTS voice instructions based on prospect personality
+        print("🎭 Generating voice personality...")
+        voice_instructions = await generate_voice_instructions(prospect_prompt)
+        
         # Extract and display persona info
         lines = prospect_prompt.split('\n')
         name_line = next((line for line in lines if '**Name**' in line or '**Name:**' in line), "Unknown")
@@ -88,6 +126,7 @@ async def entrypoint(ctx: JobContext):
         print("=" * 60)
         print(f"👤 {name_line}")
         print(f"👤 {business_line}")
+        print(f"🎭 Voice Style: {voice_instructions}")
         print("=" * 60)
         
         # Connect to room
@@ -95,7 +134,7 @@ async def entrypoint(ctx: JobContext):
         await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
         print("✅ Connected to LiveKit")
         
-        # Initialize components
+        # Initialize components with OpenAI TTS
         print("🔧 Initializing AI components...")
         agent = ProspectAgent(prospect_prompt)
         
@@ -108,12 +147,12 @@ async def entrypoint(ctx: JobContext):
         
         stt_instance = openai.STT(model="whisper-1", language="en")
         llm_instance = openai.LLM(model="gpt-4.1-nano", temperature=0.7)
-        tts_instance = cartesia.TTS(
-            model="sonic-2",
-            voice="6f84f4b8-58a2-430c-8c79-688dad597532",
-            speed=1.0,
-            encoding="pcm_s16le",
-            sample_rate=24000,
+        
+        # CHANGED: Using OpenAI GPT-4o Mini TTS with voice instructions
+        tts_instance = openai.TTS(
+            model="gpt-4o-mini-tts",
+            voice="alloy",  # Options: alloy, echo, fable, onyx, nova, shimmer
+            instructions=voice_instructions,
         )
         
         # Create session
