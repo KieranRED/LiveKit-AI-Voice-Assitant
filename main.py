@@ -173,27 +173,18 @@ async def entrypoint(ctx: JobContext):
         conversation_count = [0]
         last_speech_end_time = [None]
         session_started = [False]
+        welcome_sent = [False]
         
-        @session.on("agent_speech_started")
-        def on_agent_speech_started(event):
-            # This should trigger when audio actually starts playing
-            if session_started[0]:
-                conversation_count[0] += 1
-                if last_speech_end_time[0]:
-                    delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
-                    print(f"🤖 BOT SPEAKING [{conversation_count[0]:02d}] (delay: {delay:.2f}s)")
-                else:
-                    print(f"🤖 BOT SPEAKING [{conversation_count[0]:02d}]")
-        
-        # Fallback in case agent_speech_started doesn't exist
         @session.on("speech_created")
         def on_speech_created(event):
-            # Only use this if agent_speech_started doesn't work
-            if not session_started[0]:
+            # Skip the welcome message but count everything after
+            if not welcome_sent[0]:
+                welcome_sent[0] = True
+                print("🤖 BOT SPEAKING [WELCOME] (greeting)")
                 return
                 
-            if hasattr(event, 'source') and hasattr(event, 'audio_started'):
-                if event.source == 'generate_reply' and event.audio_started:
+            if hasattr(event, 'source'):
+                if event.source == 'generate_reply':
                     conversation_count[0] += 1
                     if last_speech_end_time[0]:
                         delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
@@ -230,8 +221,6 @@ async def entrypoint(ctx: JobContext):
         await asyncio.sleep(0.5)
         await session.generate_reply(instructions="Greet the user by saying 'Hey! Can you hear me clearly?'")
         
-        # Mark session as fully started
-        session_started[0] = True
         print("🎉 Sales bot ready! Conversation active...")
         
         # Minimal heartbeat (optional - remove if you don't want this either)
