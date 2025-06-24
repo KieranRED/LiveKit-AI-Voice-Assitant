@@ -152,15 +152,22 @@ async def entrypoint(ctx: JobContext):
         print(f"🎭 Voice Style: {voice_instructions}")
         print("=" * 60)
         
-        # Update system context with prospect info
+        # Update system context with prospect info and streaming optimization
         system_prompt = f"""You are an AI sales agent speaking to a prospect over voice chat. Here's your prospect info:
 
 {prospect_prompt}
 
 VOICE STYLE: {voice_instructions}
 
+IMPORTANT - RESPONSE FORMAT:
+- Keep ALL responses under 20 words maximum 
+- Use short, punchy sentences
+- Ask one question at a time
+- Be conversational and natural
+- Never give long explanations
+
 Your goal is to have a natural conversation and determine if they're a good fit for our services. Always:
-- Keep responses conversational and brief (1-2 sentences max)
+- Keep responses conversational and brief (1 sentence max when possible)
 - Use their name when appropriate 
 - Ask follow-up questions to understand their needs
 - Be helpful but not pushy
@@ -189,19 +196,22 @@ Your goal is to have a natural conversation and determine if they're a good fit 
             activation_threshold=0.3,   # More sensitive (was 0.4)
         )
         
-        # TTS with voice instructions
+        # TTS with voice instructions using GPT-4o mini TTS
+        # NOTE: gpt-4o-mini-tts doesn't support input streaming yet (as of June 2025)
+        # To optimize latency, we've limited response length and enabled shorter responses
         tts_instance = openai.TTS(
-            model="tts-1",
+            model="gpt-4o-mini-tts",
             voice="alloy",
             voice_instructions=voice_instructions,  # Apply the generated voice style
         )
         
         stt_instance = openai.STT(model="whisper-1", language="en")
         
-        # Optimize LLM for faster responses - removed max_tokens parameter
+        # Optimize LLM for faster responses with shorter outputs
         llm_instance = openai.LLM(
             model="gpt-4.1-nano",  # Keeping the faster model as requested
             temperature=0.7,
+            max_tokens=75,  # Limit response length for faster TTS processing
         )
 
         # Create voice assistant with optimized settings
@@ -216,38 +226,14 @@ Your goal is to have a natural conversation and determine if they're a good fit 
         # Create session
         session = assistant.start(ctx.room)
 
-        # Add voice event handlers with better timing and filtering
+        # Add voice event handlers with actual TTS timing
         conversation_count = [0]
         last_speech_end_time = [None]
         welcome_sent = [False]
-        
-        # Try multiple events to find the one that fires when audio actually starts
-        @session.on("speech_started")
-        def on_speech_started(event):
-            if not welcome_sent[0]:
-                welcome_sent[0] = True
-                print("🤖 BOT SPEAKING [WELCOME] (greeting)")
-                return
-                
-            conversation_count[0] += 1
-            if last_speech_end_time[0]:
-                delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
-                print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}] (delay: {delay:.2f}s)")
-            else:
-                print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}]")
-        
-        @session.on("audio_track_published")
-        def on_audio_published(event):
-            # This might fire when bot audio actually starts streaming
-            if hasattr(event, 'track') and hasattr(event.track, 'kind'):
-                if event.track.kind == 'audio' and hasattr(event, 'participant'):
-                    if event.participant.identity.startswith('agent') or event.participant.identity.startswith('bot'):
-                        if welcome_sent[0]:
-                            print(f"🔊 BOT AUDIO STARTED [STREAM]")
+        tts_start_time = [None]
         
         @session.on("speech_created")
         def on_speech_created(event):
-            # Keep the old event as fallback with different label
             if not welcome_sent[0]:
                 welcome_sent[0] = True
                 print("🤖 BOT SPEAKING [WELCOME] (greeting)")
@@ -255,11 +241,27 @@ Your goal is to have a natural conversation and determine if they're a good fit 
                 
             if hasattr(event, 'source'):
                 if event.source == 'generate_reply':
+                    conversation_count[0] += 1
+                    tts_start_time[0] = asyncio.get_event_loop().time()
                     if last_speech_end_time[0]:
-                        delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
-                        print(f"🤖 BOT QUEUED [{conversation_count[0]+1:02d}] (delay: {delay:.2f}s)")
+                        delay = tts_start_time[0] - last_speech_end_time[0]
+                        print(f"🤖 BOT GENERATING [{conversation_count[0]:02d}] (delay: {delay:.2f}s)")
                     else:
-                        print(f"🤖 BOT QUEUED [{conversation_count[0]+1:02d}]")
+                        print(f"🤖 BOT GENERATING [{conversation_count[0]:02d}]")
+        
+        # Try to detect when audio actually starts
+        @session.on("track_published")
+        def on_track_published(event):
+            if hasattr(event, 'publication') and hasattr(event.publication, 'track'):
+                track = event.publication.track
+                if hasattr(track, 'kind') and track.kind == 'audio':
+                    if hasattr(event, 'participant'):
+                        # Check if this is the agent/bot publishing audio
+                        participant_id = event.participant.identity
+                        if 'agent' in participant_id.lower() or 'bot' in participant_id.lower() or participant_id != 'user1234':
+                            if tts_start_time[0] and welcome_sent[0]:
+                                audio_delay = asyncio.get_event_loop().time() - tts_start_time[0]
+                                print(f"🔊 BOT AUDIO PLAYING [{conversation_count[0]:02d}] (TTS delay: {audio_delay:.2f}s)")
         
         @session.on("user_state_changed")
         def on_user_state_changed(event):
