@@ -72,7 +72,12 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"SESSION_ID: {'✅' if os.getenv('SESSION_ID') else '❌'}")
     logger.info(f"OPENAI_API_KEY: {'✅' if os.getenv('OPENAI_API_KEY') else '❌'}")
 
-    # Wait for a participant to connect
+    # Connect to the room first (required in v1.0+)
+    print("📡 Connecting to LiveKit...")
+    await ctx.connect()
+    print("✅ Connected to LiveKit")
+
+    # Now wait for a participant to connect
     await ctx.wait_for_participant()
 
     print("🚀 Starting AI Sales Bot...")
@@ -169,10 +174,7 @@ Your goal is to have a natural conversation and determine if they're a good fit 
         voice_instructions = "Speak in a natural, conversational tone with moderate pace and energy."
         system_prompt = "You are a voice assistant created by LiveKit. Your interface with users will be voice. You should use short and concise responses, and avoiding usage of unpronouncable punctuation."
 
-    # Connect to the room
-    print(f"📡 Connecting to room: {room_name}")
-    await ctx.connect()
-    print("✅ Connected to LiveKit")
+    # Already connected above
 
     # Initialize components with optimizations
     print("🔧 Initializing AI components...")
