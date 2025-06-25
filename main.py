@@ -228,31 +228,54 @@ Your goal is to have a natural conversation and determine if they're a good fit 
         # Event handlers for tracking conversation flow (v1.0+ event names)
         
         # Combined handler for user speech transcription (handles both partial and final)
+        speech_segments = []  # Track speech segments for aggregation
+        user_speaking_start_time = [None]  # Track when user started speaking
+        
         @session.on("user_input_transcribed")
         def on_user_input_transcribed(event):
             if hasattr(event, 'transcript') and hasattr(event, 'is_final'):
                 # Detect speech start from partial transcriptions
                 if not event.is_final and len(event.transcript.strip()) > 0:
-                    if not hasattr(on_user_input_transcribed, '_user_speaking'):
-                        on_user_input_transcribed._user_speaking = True
+                    if user_speaking_start_time[0] is None:
+                        user_speaking_start_time[0] = asyncio.get_event_loop().time()
                         print("🎤 User started speaking...")
                         
-                # Handle final transcriptions
-                elif event.is_final:
-                    # Log the final transcription
-                    if hasattr(on_user_input_transcribed, '_user_speaking'):
-                        print("🎤 User stopped speaking.")
-                        del on_user_input_transcribed._user_speaking
+                # Handle final transcriptions - aggregate them
+                elif event.is_final and len(event.transcript.strip()) > 0:
+                    current_time = asyncio.get_event_loop().time()
+                    speech_segments.append({
+                        'text': event.transcript,
+                        'time': current_time
+                    })
                     
-                    # Calculate STT delay (time since last response ended)
-                    if last_speech_end_time[0]:
-                        stt_delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
-                        print(f"🎤 USER SAID: {event.transcript} (response delay: {stt_delay:.2f}s)")
-                    else:
-                        print(f"🎤 USER SAID: {event.transcript}")
+                    # Check if this seems like the end of speech (no more segments for 2 seconds)
+                    async def check_speech_end():
+                        await asyncio.sleep(2.0)  # Wait 2 seconds
+                        
+                        # If no new segments were added, user likely finished speaking
+                        if speech_segments and speech_segments[-1]['text'] == event.transcript:
+                            # Combine all recent segments into one message
+                            full_text = ' '.join([seg['text'] for seg in speech_segments])
+                            
+                            if user_speaking_start_time[0]:
+                                print("🎤 User stopped speaking.")
+                                
+                                # Calculate timing since last bot response
+                                if last_speech_end_time[0]:
+                                    response_delay = user_speaking_start_time[0] - last_speech_end_time[0]
+                                    print(f"🎤 USER SAID: {full_text} (response delay: {response_delay:.2f}s)")
+                                else:
+                                    print(f"🎤 USER SAID: {full_text}")
+                                
+                                # Update timing for next bot response calculation
+                                last_speech_end_time[0] = current_time
+                                
+                                # Reset tracking variables
+                                user_speaking_start_time[0] = None
+                                speech_segments.clear()
                     
-                    # Update the last speech end time for calculating bot response delay
-                    last_speech_end_time[0] = asyncio.get_event_loop().time()
+                    # Start the check task (but don't wait for it)
+                    asyncio.create_task(check_speech_end())
         
         # Listen for agent state changes (when bot actually starts/stops speaking)
         @session.on("agent_state_changed")
