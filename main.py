@@ -10,8 +10,8 @@ from livekit import agents, rtc
 from livekit.agents import JobContext, WorkerOptions, cli, tokenize, tts
 from livekit.agents.llm import (
     ChatContext,
-    ChatImage,
-    ChatMessage,
+    # ChatImage,  # Removed - not used and causing import error
+    # ChatMessage,  # Removed - not used
 )
 from livekit.agents.voice_assistant import VoiceAssistant
 from livekit.plugins import openai, silero
