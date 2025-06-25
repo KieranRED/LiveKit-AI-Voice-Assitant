@@ -132,9 +132,17 @@ async def entrypoint(ctx: JobContext):
         pdf_content = extract_pdf_text("assets/sales.pdf")
         print(f"✅ PDF loaded ({len(pdf_content)} chars)")
         
-        # Generate prospect persona
+        # Generate prospect persona with required arguments
+        # Adjust these parameters based on your gpt_utils.py function requirements
         print("🧠 Generating prospect persona...")
-        prospect_prompt = await get_prospect_prompt(pdf_content)
+        prospect_prompt = await get_prospect_prompt(
+            pdf_content,
+            objection_focus="price_concerns",  # Common: "price_concerns", "time_concerns", "authority_concerns"
+            toughness_level="medium",         # Options: "easy", "medium", "hard"
+            call_type="discovery",           # Options: "discovery", "demo", "closing", "follow_up"
+            tone="professional",             # Options: "professional", "casual", "friendly", "formal"
+            business_pdf_text=pdf_content
+        )
         print(f"📝 Prompt length: {len(prospect_prompt)} characters")
         
         # Generate voice personality based on prospect
@@ -186,18 +194,18 @@ Your goal is to have a natural conversation and determine if they're a good fit 
             activation_threshold=0.3,   # More sensitive (was 0.4)
         )
         
-        # TTS with voice instructions (note: voice_instructions may not be supported in v1.0+)
+        # TTS with correct model
         tts_instance = openai.TTS(
-            model="tts-1",
+            model="gpt-4o-mini-tts",  # Fixed TTS model
             voice="alloy",
             # voice_instructions=voice_instructions,  # This parameter may not exist in v1.0+
         )
         
         stt_instance = openai.STT(model="whisper-1", language="en")
         
-        # Optimize LLM for faster responses
+        # Optimize LLM for faster responses with correct model
         llm_instance = openai.LLM(
-            model="gpt-4o-mini",  # Fixed model name
+            model="gpt4.1nano",  # Fixed LLM model
             temperature=0.7,
         )
 
@@ -217,12 +225,21 @@ Your goal is to have a natural conversation and determine if they're a good fit 
         last_speech_end_time = [None]
         welcome_sent = [False]
         
-        # Event handlers for tracking conversation flow
-        # Note: The exact event names may be different in v1.0+, this might need adjustment
+        # Event handlers for tracking conversation flow (v1.0+ event names)
         
-        # Listen for agent speech events
-        @session.on("agent_speech_started")
-        def on_agent_speech_started(event):
+        # Listen for user speech transcription
+        @session.on("user_input_transcribed")
+        def on_user_input_transcribed(event):
+            if hasattr(event, 'transcript') and hasattr(event, 'is_final') and event.is_final:
+                if last_speech_end_time[0]:
+                    stt_delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
+                    print(f"🎤 USER SAID: {event.transcript} (STT delay: {stt_delay:.2f}s)")
+                else:
+                    print(f"🎤 USER SAID: {event.transcript}")
+        
+        # Listen for agent speech creation
+        @session.on("speech_created")
+        def on_speech_created(event):
             if not welcome_sent[0]:
                 welcome_sent[0] = True
                 print("🤖 BOT SPEAKING [WELCOME] (greeting)")
@@ -235,34 +252,24 @@ Your goal is to have a natural conversation and determine if they're a good fit 
             else:
                 print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}]")
         
-        @session.on("agent_speech_committed")
-        def on_agent_speech_committed(event):
-            # Keep the old event as fallback with different label
-            if not welcome_sent[0]:
-                welcome_sent[0] = True
-                print("🤖 BOT SPEAKING [WELCOME] (greeting)")
-                return
-                
-            if last_speech_end_time[0]:
-                delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
-                print(f"🤖 BOT QUEUED [{conversation_count[0]+1:02d}] (delay: {delay:.2f}s)")
-            else:
-                print(f"🤖 BOT QUEUED [{conversation_count[0]+1:02d}]")
+        # Listen for user state changes (speaking/not speaking)
+        @session.on("user_state_changed")
+        def on_user_state_changed(event):
+            if hasattr(event, 'state'):
+                if event.state == 'speaking':
+                    print("🎤 User started speaking...")
+                elif event.state == 'listening':
+                    last_speech_end_time[0] = asyncio.get_event_loop().time()
+                    print("🎤 User stopped speaking.")
         
-        # Listen for user speech events
-        @session.on("user_speech_started")
-        def on_user_speech_started(event):
-            print("🎤 User started speaking...")
-                
-        @session.on("user_speech_committed")
-        def on_user_speech_committed(event):
-            last_speech_end_time[0] = asyncio.get_event_loop().time()
-            print("🎤 User stopped speaking.")
-            
-            # Print the transcribed text if available
-            if hasattr(event, 'message') and hasattr(event.message, 'content'):
-                stt_delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
-                print(f"🎤 USER SAID: {event.message.content} (STT delay: {stt_delay:.2f}s)")
+        # Listen for conversation items being added to chat history
+        @session.on("conversation_item_added")
+        def on_conversation_item_added(event):
+            if hasattr(event, 'item'):
+                if event.item.role == 'user':
+                    print(f"📝 User message added to chat: {event.item.text_content}")
+                elif event.item.role == 'assistant':
+                    print(f"📝 Bot message added to chat: {event.item.text_content}")
 
         print("🔧 Speech event handlers added")
 
