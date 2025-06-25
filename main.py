@@ -205,7 +205,7 @@ Your goal is to have a natural conversation and determine if they're a good fit 
         
         # Optimize LLM for faster responses with correct model
         llm_instance = openai.LLM(
-            model="gpt4.1nano",  # Fixed LLM model
+            model="gpt-4.1-nano",  # Fixed LLM model (with hyphens)
             temperature=0.7,
         )
 
