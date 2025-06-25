@@ -254,20 +254,30 @@ Your goal is to have a natural conversation and determine if they're a good fit 
                     # Update the last speech end time for calculating bot response delay
                     last_speech_end_time[0] = asyncio.get_event_loop().time()
         
-        # Listen for agent speech creation
+        # Listen for agent state changes (when bot actually starts/stops speaking)
+        @session.on("agent_state_changed")
+        def on_agent_state_changed(event):
+            if hasattr(event, 'new_state') and hasattr(event, 'old_state'):
+                if event.new_state == 'speaking':
+                    if not welcome_sent[0]:
+                        welcome_sent[0] = True
+                        print("🤖 BOT SPEAKING [WELCOME] (greeting)")
+                        return
+                        
+                    conversation_count[0] += 1
+                    if last_speech_end_time[0]:
+                        delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
+                        print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}] (delay: {delay:.2f}s)")
+                    else:
+                        print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}]")
+                        
+                elif event.old_state == 'speaking' and event.new_state != 'speaking':
+                    print("🤖 Bot finished speaking.")
+        
+        # Keep speech_created for debugging but don't use it for main logging
         @session.on("speech_created")
         def on_speech_created(event):
-            if not welcome_sent[0]:
-                welcome_sent[0] = True
-                print("🤖 BOT SPEAKING [WELCOME] (greeting)")
-                return
-                
-            conversation_count[0] += 1
-            if last_speech_end_time[0]:
-                delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
-                print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}] (delay: {delay:.2f}s)")
-            else:
-                print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}]")
+            print(f"🔧 Speech queued for TTS synthesis...")
         
         # Try user_state_changed (may not work due to known v1.0 bug)
         @session.on("user_state_changed")
