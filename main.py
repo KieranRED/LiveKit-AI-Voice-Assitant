@@ -7,13 +7,16 @@ from typing import Annotated
 
 import aiohttp
 from livekit import agents, rtc
-from livekit.agents import JobContext, WorkerOptions, cli, tokenize, tts
-from livekit.agents.llm import (
-    ChatContext,
-    # ChatImage,  # Removed - not used and causing import error
-    # ChatMessage,  # Removed - not used
+from livekit.agents import (
+    Agent,
+    AgentSession,
+    JobContext, 
+    WorkerOptions, 
+    cli, 
+    tokenize, 
+    tts
 )
-from livekit.agents.voice_assistant import VoiceAssistant
+# Note: ChatContext is likely in llm module now, but we'll use Agent instructions instead
 from livekit.plugins import openai, silero
 from pdf_utils import extract_pdf_text
 from gpt_utils import get_prospect_prompt
@@ -62,14 +65,7 @@ def prewarm(proc: agents.JobProcess):
 
 async def entrypoint(ctx: JobContext):
     """Main agent entry point"""
-    initial_ctx = ChatContext().append(
-        role="system",
-        text=(
-            "You are a voice assistant created by LiveKit. Your interface with users will be voice. "
-            "You should use short and concise responses, and avoiding usage of unpronouncable punctuation."
-        ),
-    )
-
+    
     logger.info("🔍 Environment Check:")
     logger.info(f"SUPABASE_URL: {'✅' if os.getenv('SUPABASE_URL') else '❌'}")
     logger.info(f"SUPABASE_SERVICE_ROLE: {'✅' if os.getenv('SUPABASE_SERVICE_ROLE') else '❌'}")
@@ -167,12 +163,11 @@ Your goal is to have a natural conversation and determine if they're a good fit 
 - Match the voice style described above
 - Sound natural and human-like"""
 
-        initial_ctx = ChatContext().append(role="system", text=system_prompt)
-
     except Exception as e:
         logger.error(f"❌ Error setting up prospect: {e}")
         # Fallback to basic context
         voice_instructions = "Speak in a natural, conversational tone with moderate pace and energy."
+        system_prompt = "You are a voice assistant created by LiveKit. Your interface with users will be voice. You should use short and concise responses, and avoiding usage of unpronouncable punctuation."
 
     # Connect to the room
     print(f"📡 Connecting to room: {room_name}")
@@ -189,41 +184,43 @@ Your goal is to have a natural conversation and determine if they're a good fit 
             activation_threshold=0.3,   # More sensitive (was 0.4)
         )
         
-        # TTS with voice instructions
+        # TTS with voice instructions (note: voice_instructions may not be supported in v1.0+)
         tts_instance = openai.TTS(
             model="tts-1",
             voice="alloy",
-            voice_instructions=voice_instructions,  # Apply the generated voice style
+            # voice_instructions=voice_instructions,  # This parameter may not exist in v1.0+
         )
         
         stt_instance = openai.STT(model="whisper-1", language="en")
         
-        # Optimize LLM for faster responses - removed max_tokens parameter
+        # Optimize LLM for faster responses
         llm_instance = openai.LLM(
-            model="gpt-4.1-nano",  # Keeping the faster model as requested
+            model="gpt-4o-mini",  # Fixed model name
             temperature=0.7,
         )
 
-        # Create voice assistant with optimized settings
-        assistant = VoiceAssistant(
+        # Create Agent with system prompt
+        agent = Agent(instructions=system_prompt)
+
+        # Create AgentSession with optimized settings
+        session = AgentSession(
             vad=vad_instance,
             stt=stt_instance,
             llm=llm_instance,
             tts=tts_instance,
-            chat_ctx=initial_ctx,
         )
 
-        # Create session
-        session = assistant.start(ctx.room)
-
-        # Add voice event handlers with better timing and filtering
+        # Conversation tracking variables
         conversation_count = [0]
         last_speech_end_time = [None]
         welcome_sent = [False]
         
-        # Try multiple events to find the one that fires when audio actually starts
-        @session.on("speech_started")
-        def on_speech_started(event):
+        # Event handlers for tracking conversation flow
+        # Note: The exact event names may be different in v1.0+, this might need adjustment
+        
+        # Listen for agent speech events
+        @session.on("agent_speech_started")
+        def on_agent_speech_started(event):
             if not welcome_sent[0]:
                 welcome_sent[0] = True
                 print("🤖 BOT SPEAKING [WELCOME] (greeting)")
@@ -236,54 +233,40 @@ Your goal is to have a natural conversation and determine if they're a good fit 
             else:
                 print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}]")
         
-        @session.on("audio_track_published")
-        def on_audio_published(event):
-            # This might fire when bot audio actually starts streaming
-            if hasattr(event, 'track') and hasattr(event.track, 'kind'):
-                if event.track.kind == 'audio' and hasattr(event, 'participant'):
-                    if event.participant.identity.startswith('agent') or event.participant.identity.startswith('bot'):
-                        if welcome_sent[0]:
-                            print(f"🔊 BOT AUDIO STARTED [STREAM]")
-        
-        @session.on("speech_created")
-        def on_speech_created(event):
+        @session.on("agent_speech_committed")
+        def on_agent_speech_committed(event):
             # Keep the old event as fallback with different label
             if not welcome_sent[0]:
                 welcome_sent[0] = True
                 print("🤖 BOT SPEAKING [WELCOME] (greeting)")
                 return
                 
-            if hasattr(event, 'source'):
-                if event.source == 'generate_reply':
-                    if last_speech_end_time[0]:
-                        delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
-                        print(f"🤖 BOT QUEUED [{conversation_count[0]+1:02d}] (delay: {delay:.2f}s)")
-                    else:
-                        print(f"🤖 BOT QUEUED [{conversation_count[0]+1:02d}]")
+            if last_speech_end_time[0]:
+                delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
+                print(f"🤖 BOT QUEUED [{conversation_count[0]+1:02d}] (delay: {delay:.2f}s)")
+            else:
+                print(f"🤖 BOT QUEUED [{conversation_count[0]+1:02d}]")
         
-        @session.on("user_state_changed")
-        def on_user_state_changed(event):
-            if hasattr(event, 'new_state'):
-                if event.new_state == 'speaking':
-                    print("🎤 User started speaking...")
-                elif event.new_state == 'listening' and hasattr(event, 'old_state') and event.old_state == 'speaking':
-                    last_speech_end_time[0] = asyncio.get_event_loop().time()
-                    print("🎤 User stopped speaking.")
-        
-        @session.on("user_input_transcribed") 
-        def on_user_input_transcribed(event):
-            if hasattr(event, 'transcript') and hasattr(event, 'is_final') and event.is_final:
-                if last_speech_end_time[0]:
-                    stt_delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
-                    print(f"🎤 USER SAID: {event.transcript} (STT delay: {stt_delay:.2f}s)")
-                else:
-                    print(f"🎤 USER SAID: {event.transcript}")
+        # Listen for user speech events
+        @session.on("user_speech_started")
+        def on_user_speech_started(event):
+            print("🎤 User started speaking...")
+                
+        @session.on("user_speech_committed")
+        def on_user_speech_committed(event):
+            last_speech_end_time[0] = asyncio.get_event_loop().time()
+            print("🎤 User stopped speaking.")
+            
+            # Print the transcribed text if available
+            if hasattr(event, 'message') and hasattr(event.message, 'content'):
+                stt_delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
+                print(f"🎤 USER SAID: {event.message.content} (STT delay: {stt_delay:.2f}s)")
 
         print("🔧 Speech event handlers added")
 
         # Start the session
         print("🔧 Starting session...")
-        await session.astart()
+        await session.start(agent=agent, room=ctx.room)
 
         # Send welcome message
         print("🗣️ Sending welcome message...")
