@@ -227,15 +227,32 @@ Your goal is to have a natural conversation and determine if they're a good fit 
         
         # Event handlers for tracking conversation flow (v1.0+ event names)
         
-        # Listen for user speech transcription
+        # Combined handler for user speech transcription (handles both partial and final)
         @session.on("user_input_transcribed")
         def on_user_input_transcribed(event):
-            if hasattr(event, 'transcript') and hasattr(event, 'is_final') and event.is_final:
-                if last_speech_end_time[0]:
-                    stt_delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
-                    print(f"🎤 USER SAID: {event.transcript} (STT delay: {stt_delay:.2f}s)")
-                else:
-                    print(f"🎤 USER SAID: {event.transcript}")
+            if hasattr(event, 'transcript') and hasattr(event, 'is_final'):
+                # Detect speech start from partial transcriptions
+                if not event.is_final and len(event.transcript.strip()) > 0:
+                    if not hasattr(on_user_input_transcribed, '_user_speaking'):
+                        on_user_input_transcribed._user_speaking = True
+                        print("🎤 User started speaking...")
+                        
+                # Handle final transcriptions
+                elif event.is_final:
+                    # Log the final transcription
+                    if hasattr(on_user_input_transcribed, '_user_speaking'):
+                        print("🎤 User stopped speaking.")
+                        del on_user_input_transcribed._user_speaking
+                    
+                    # Calculate STT delay (time since last response ended)
+                    if last_speech_end_time[0]:
+                        stt_delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
+                        print(f"🎤 USER SAID: {event.transcript} (response delay: {stt_delay:.2f}s)")
+                    else:
+                        print(f"🎤 USER SAID: {event.transcript}")
+                    
+                    # Update the last speech end time for calculating bot response delay
+                    last_speech_end_time[0] = asyncio.get_event_loop().time()
         
         # Listen for agent speech creation
         @session.on("speech_created")
@@ -252,15 +269,14 @@ Your goal is to have a natural conversation and determine if they're a good fit 
             else:
                 print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}]")
         
-        # Listen for user state changes (speaking/not speaking)
+        # Try user_state_changed (may not work due to known v1.0 bug)
         @session.on("user_state_changed")
         def on_user_state_changed(event):
             if hasattr(event, 'state'):
                 if event.state == 'speaking':
-                    print("🎤 User started speaking...")
+                    print("🎤 User started speaking... (via user_state_changed)")
                 elif event.state == 'listening':
-                    last_speech_end_time[0] = asyncio.get_event_loop().time()
-                    print("🎤 User stopped speaking.")
+                    print("🎤 User stopped speaking. (via user_state_changed)")
         
         # Listen for conversation items being added to chat history
         @session.on("conversation_item_added")
