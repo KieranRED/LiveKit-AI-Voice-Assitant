@@ -365,7 +365,7 @@ async def entrypoint(ctx: JobContext):
         session = AgentSession(
             vad=silero.VAD.load(),
             stt=GroqSTT(model="distil-whisper-large-v3-en"), # 🚀 240x faster than real-time!
-            llm=lk_openai.LLM(model="gpt-4o-mini"),
+            llm=lk_openai.LLM(model="gpt-4.1-nano"),
             tts=lk_openai.TTS(),
         )
         print("🚀 Using Groq STT for ultra-fast speech recognition!")
@@ -374,7 +374,7 @@ async def entrypoint(ctx: JobContext):
         session = AgentSession(
             vad=silero.VAD.load(),
             stt=lk_openai.STT(),
-            llm=lk_openai.LLM(model="gpt-4o-mini"),
+            llm=lk_openai.LLM(model="gpt-4.1-nano"),
             tts=lk_openai.TTS(),
         )
         print("📢 Using OpenAI STT (slower fallback)")
