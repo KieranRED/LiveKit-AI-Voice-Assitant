@@ -404,7 +404,7 @@ async def entrypoint(ctx: JobContext):
 if __name__ == "__main__":
     # Configure worker options
     worker_options = WorkerOptions(
-        request_fnc=entrypoint,
+        entrypoint_fnc=entrypoint,
         worker_type=agents.WorkerType.ROOM,
     )
     
