@@ -12,7 +12,7 @@ import httpx
 from groq import Groq
 from livekit import agents, rtc
 from livekit.agents import JobContext, WorkerOptions, cli, AgentSession, Agent
-from livekit.agents.stt import STT, SpeechEvent, SpeechEventType, STTCapabilities
+from livekit.agents.stt import STT, SpeechEvent, SpeechEventType, STTCapabilities, SpeechData
 from livekit.plugins import openai as lk_openai, silero
 
 
@@ -96,17 +96,17 @@ class GroqSTT(STT):
             
             print(f"⚡ Groq STT: '{text}' (processed in {processing_time:.3f}s)")
             
+            # Fallback to empty transcript
             return SpeechEvent(
                 type=SpeechEventType.FINAL_TRANSCRIPT,
-                text=text  # Use 'text' instead of 'transcript'
+                alternatives=[SpeechData(text="")]  # Create SpeechData object
             )
             
         except Exception as e:
             print(f"❌ Groq STT Error: {e}")
-            # Fallback to empty transcript
             return SpeechEvent(
                 type=SpeechEventType.FINAL_TRANSCRIPT,
-                text=""  # Use 'text' instead of 'transcript'
+                alternatives=[SpeechData(text=text)]  # Create SpeechData object
             )
 
 
