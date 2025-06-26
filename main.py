@@ -451,18 +451,27 @@ async def entrypoint(ctx: JobContext):
                     
                 conversation_count[0] += 1
                 
-                # Calculate REAL delay from user stopping to bot speaking
+                # Calculate delay from user stopping to bot speaking (TTS start)
                 if user_stopped_speaking_time[0]:
-                    real_delay = current_time - user_stopped_speaking_time[0]
-                    print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}] 🎯 REAL DELAY: {real_delay:.2f}s")
+                    tts_start_delay = current_time - user_stopped_speaking_time[0]
+                    
+                    # Add estimated audio pipeline delay (streaming + buffering + playback)
+                    estimated_audio_delay = 2.0  # Conservative estimate for real user experience
+                    total_user_delay = tts_start_delay + estimated_audio_delay
+                    
+                    print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}]")
+                    print(f"   🎯 TTS START DELAY: {tts_start_delay:.2f}s")
+                    print(f"   🎧 ESTIMATED USER-HEARD DELAY: {total_user_delay:.2f}s")
                     
                     # Breakdown of delays
-                    if user_said_time[0] and llm_start_time[0] and tts_start_time[0]:
+                    if user_said_time[0] and tts_start_time[0]:
                         stt_time = user_said_time[0] - user_stopped_speaking_time[0] 
-                        llm_time = llm_start_time[0] - user_said_time[0]
-                        tts_time = tts_start_time[0] - llm_start_time[0]
-                        audio_time = current_time - tts_start_time[0]
-                        print(f"   📊 Breakdown: STT={stt_time:.2f}s + LLM={llm_time:.2f}s + TTS={tts_time:.2f}s + Audio={audio_time:.2f}s")
+                        # LLM time is from STT completion to TTS start
+                        llm_time = tts_start_time[0] - user_said_time[0] if tts_start_time[0] > user_said_time[0] else 0
+                        # TTS generation time (from TTS start to agent speaking)
+                        tts_gen_time = current_time - tts_start_time[0] if current_time > tts_start_time[0] else 0
+                        
+                        print(f"   📊 Breakdown: STT={stt_time:.2f}s + LLM={llm_time:.2f}s + TTS={tts_gen_time:.2f}s + Audio≈{estimated_audio_delay:.1f}s")
                 else:
                     print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}]")
                     
