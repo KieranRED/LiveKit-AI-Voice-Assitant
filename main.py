@@ -70,6 +70,9 @@ class GroqSTT(STT):
         try:
             start_time = time.time()
             
+            # Default language if not provided
+            detected_language = language or "en"
+            
             # Convert AudioFrame to WAV format for Groq
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
                 # Create WAV file with proper format
@@ -96,17 +99,18 @@ class GroqSTT(STT):
             
             print(f"⚡ Groq STT: '{text}' (processed in {processing_time:.3f}s)")
             
-            # Fallback to empty transcript
+            # Return successful transcription
             return SpeechEvent(
                 type=SpeechEventType.FINAL_TRANSCRIPT,
-                alternatives=[SpeechData(text="")]  # Create SpeechData object
+                alternatives=[SpeechData(text=text, language=detected_language)]
             )
             
         except Exception as e:
             print(f"❌ Groq STT Error: {e}")
+            # Return empty result on error
             return SpeechEvent(
                 type=SpeechEventType.FINAL_TRANSCRIPT,
-                alternatives=[SpeechData(text=text)]  # Create SpeechData object
+                alternatives=[SpeechData(text="", language=language or "en")]
             )
 
 
