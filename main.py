@@ -13,6 +13,8 @@ import asyncio
 import os
 import time
 import json
+import wave
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -29,7 +31,7 @@ class GroqSTT(STT):
     """Custom Speech-to-Text implementation using Groq's ultra-fast Distil-Whisper"""
     
     def __init__(self, model: str = "distil-whisper-large-v3-en"):
-        super().__init__(capabilities=STT.Capabilities(streaming=False, interim_results=False))
+        super().__init__()  # Simple initialization
         self._client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         self._model = model
         print(f"🚀 Groq STT initialized with model: {model}")
