@@ -98,7 +98,7 @@ class GroqSTT(STT):
             
             return SpeechEvent(
                 type=SpeechEventType.FINAL_TRANSCRIPT,
-                transcript=text
+                text=text  # Use 'text' instead of 'transcript'
             )
             
         except Exception as e:
@@ -106,7 +106,7 @@ class GroqSTT(STT):
             # Fallback to empty transcript
             return SpeechEvent(
                 type=SpeechEventType.FINAL_TRANSCRIPT,
-                transcript=""
+                text=""  # Use 'text' instead of 'transcript'
             )
 
 
