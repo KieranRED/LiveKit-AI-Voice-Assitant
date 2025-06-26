@@ -350,7 +350,7 @@ async def entrypoint(ctx: JobContext):
         if os.getenv("GROQ_API_KEY"):
             session = AgentSession(
                 ctx=ctx,
-                model=lk_openai.ChatGPT(
+                model=lk_openai.LLM(
                     model="gpt-4o-mini",
                     api_key=os.getenv("OPENAI_API_KEY"),
                 ),
@@ -370,7 +370,7 @@ async def entrypoint(ctx: JobContext):
             # Fallback to OpenAI STT
             session = AgentSession(
                 ctx=ctx,
-                model=lk_openai.ChatGPT(
+                model=lk_openai.LLM(
                     model="gpt-4o-mini",
                     api_key=os.getenv("OPENAI_API_KEY"),
                 ),
