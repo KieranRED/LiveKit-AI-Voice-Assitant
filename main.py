@@ -23,7 +23,7 @@ import httpx
 from groq import Groq
 from livekit import agents, rtc
 from livekit.agents import JobContext, WorkerOptions, cli, AgentSession, Agent
-from livekit.agents.stt import STT, SpeechEvent, SpeechEventType
+from livekit.agents.stt import STT, SpeechEvent, SpeechEventType, STTCapabilities
 from livekit.plugins import openai as lk_openai, silero
 
 # Custom Groq STT Implementation for LiveKit
