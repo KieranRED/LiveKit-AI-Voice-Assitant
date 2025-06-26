@@ -59,7 +59,13 @@ class GroqSTT(STT):
         self._model = model
         print(f"🚀 Groq STT initialized with model: {model}")
     
-    async def _recognize_impl(self, buffer: rtc.AudioFrame, *, language: Optional[str] = None) -> SpeechEvent:
+    async def _recognize_impl(
+        self, 
+        buffer: rtc.AudioFrame, 
+        *, 
+        language: Optional[str] = None,
+        conn_options=None,  # Add this parameter that LiveKit passes
+    ) -> SpeechEvent:
         """Convert audio buffer to text using Groq's super-fast API (LiveKit interface)"""
         try:
             start_time = time.time()
