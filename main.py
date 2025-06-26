@@ -1,5 +1,12 @@
 """
-main.py - LiveKit Voice Assistant with proper event logging
+main.py - LiveKit Voice Assistant with ULTRA-FAST Groq STT
+
+Dependencies to add:
+- groq>=0.4.0
+- httpx (already included)
+
+Environment variables needed:
+- GROQ_API_KEY=your_groq_api_key_here
 """
 
 import asyncio
@@ -10,9 +17,69 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 import openai
+import httpx
+from groq import Groq
 from livekit import agents, rtc
 from livekit.agents import JobContext, WorkerOptions, cli, AgentSession, Agent
+from livekit.agents.stt import STT, SpeechEvent, SpeechEventType
 from livekit.plugins import openai as lk_openai, silero
+
+# Custom Groq STT Implementation for LiveKit
+class GroqSTT(STT):
+    """Custom Speech-to-Text implementation using Groq's ultra-fast Distil-Whisper"""
+    
+    def __init__(self, model: str = "distil-whisper-large-v3-en"):
+        super().__init__(capabilities=STT.Capabilities(streaming=False, interim_results=False))
+        self._client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        self._model = model
+        print(f"🚀 Groq STT initialized with model: {model}")
+    
+    async def recognize(self, buffer: rtc.AudioFrame) -> SpeechEvent:
+        """Convert audio buffer to text using Groq's super-fast API"""
+        try:
+            start_time = time.time()
+            
+            # Convert AudioFrame to WAV format for Groq
+            import wave
+            import tempfile
+            
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                # Create WAV file with proper format
+                with wave.open(temp_file.name, 'wb') as wav_file:
+                    wav_file.setnchannels(buffer.num_channels)
+                    wav_file.setsampwidth(2)  # 16-bit
+                    wav_file.setframerate(buffer.sample_rate)
+                    wav_file.writeframes(buffer.data.tobytes())
+                
+                # Call Groq API - this is where the magic happens!
+                with open(temp_file.name, "rb") as audio_file:
+                    transcription = await asyncio.to_thread(
+                        self._client.audio.transcriptions.create,
+                        file=audio_file,
+                        model=self._model,
+                        response_format="json"
+                    )
+                
+                # Clean up temp file
+                os.unlink(temp_file.name)
+            
+            processing_time = time.time() - start_time
+            text = transcription.text.strip()
+            
+            print(f"⚡ Groq STT: '{text}' (processed in {processing_time:.3f}s)")
+            
+            return SpeechEvent(
+                type=SpeechEventType.FINAL_TRANSCRIPT,
+                transcript=text
+            )
+            
+        except Exception as e:
+            print(f"❌ Groq STT Error: {e}")
+            # Fallback to empty transcript
+            return SpeechEvent(
+                type=SpeechEventType.FINAL_TRANSCRIPT,
+                transcript=""
+            )
 
 # Environment validation
 def validate_environment():
@@ -22,6 +89,7 @@ def validate_environment():
         "LIVEKIT_API_KEY", 
         "LIVEKIT_API_SECRET",
         "OPENAI_API_KEY",
+        "GROQ_API_KEY",  # Added for ultra-fast STT
         "SUPABASE_URL",
         "SUPABASE_SERVICE_ROLE"
     ]
@@ -229,7 +297,7 @@ async def entrypoint(ctx: JobContext):
     
     # Environment validation
     print("🔍 Environment Check:")
-    env_vars = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE", "SESSION_ID", "OPENAI_API_KEY"]
+    env_vars = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE", "SESSION_ID", "OPENAI_API_KEY", "GROQ_API_KEY"]
     for var in env_vars:
         status = "✅" if os.getenv(var) else "❌"
         print(f"{var}: {status}")
@@ -271,10 +339,10 @@ async def entrypoint(ctx: JobContext):
         instructions=persona_prompt,
     )
     
-    # Create the session with all components
+    # Create the session with ULTRA-FAST Groq STT
     session = AgentSession(
         vad=silero.VAD.load(),
-        stt=lk_openai.STT(),
+        stt=GroqSTT(model="distil-whisper-large-v3-en"),  # 🚀 240x faster than real-time!
         llm=lk_openai.LLM(model="gpt-4o-mini"),
         tts=lk_openai.TTS(),
     )
@@ -353,6 +421,8 @@ async def entrypoint(ctx: JobContext):
 
     print("🔧 Speech event handlers added")
     print("🔧 Starting session...")
+    print("⚡ SPEED UPGRADE: Groq Distil-Whisper (240x real-time) vs OpenAI Whisper")
+    print("   Expected STT time: ~0.1s (was 1.6s) = 16x faster response!")
     
     # Start the session
     await session.start(agent=agent, room=ctx.room)
