@@ -46,7 +46,7 @@ def check_env_vars():
         return True
 
 
-# Custom Groq STT Implementation for LiveKit
+# Custom Groq STT Implementation for LiveKit (FIXED VERSION)
 class GroqSTT(STT):
     """Custom Speech-to-Text implementation using Groq's ultra-fast Distil-Whisper"""
     
@@ -355,12 +355,12 @@ async def entrypoint(ctx: JobContext):
     
     print("🔧 Initializing AI components...")
     
-    # Create the agent with instructions (the working pattern!)
+    # Create the agent with instructions
     agent = Agent(
         instructions=prompt,
     )
     
-    # Create the session with individual components (like your working version)
+    # Create the session with individual components
     if os.getenv("GROQ_API_KEY"):
         session = AgentSession(
             vad=silero.VAD.load(),
@@ -379,10 +379,83 @@ async def entrypoint(ctx: JobContext):
         )
         print("📢 Using OpenAI STT (slower fallback)")
     
+    # Track conversation state for better logging
+    conversation_count = [0]
+    welcome_sent = [False]
+    last_speech_end_time = [None]
+    
+    # Event handlers for tracking conversation flow - WITH DEBUG LOGGING
+    
+    # Listen for agent state changes (when bot actually starts/stops speaking)
+    @session.on("agent_state_changed")
+    def on_agent_state_changed(event):
+        if hasattr(event, 'new_state') and hasattr(event, 'old_state'):
+            if event.new_state == 'speaking':
+                if not welcome_sent[0]:
+                    welcome_sent[0] = True
+                    print("🤖 BOT SPEAKING [WELCOME] (greeting)")
+                    return
+                    
+                conversation_count[0] += 1
+                if last_speech_end_time[0]:
+                    delay = asyncio.get_event_loop().time() - last_speech_end_time[0]
+                    print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}] (delay: {delay:.2f}s)")
+                else:
+                    print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}]")
+                    
+            elif event.old_state == 'speaking' and event.new_state != 'speaking':
+                print("🤖 Bot finished speaking.")
+    
+    # Keep speech_created for debugging
+    @session.on("speech_created")
+    def on_speech_created(event):
+        print(f"🔧 Speech queued for TTS synthesis...")
+    
+    # Listen for conversation items being added to chat history 
+    @session.on("conversation_item_added")
+    def on_conversation_item_added(event):
+        if hasattr(event, 'item'):
+            if event.item.role == 'user':
+                # User turn completed - calculate response delay
+                current_time = asyncio.get_event_loop().time()
+                
+                if last_speech_end_time[0]:
+                    response_delay = current_time - last_speech_end_time[0]
+                    print(f"🎤 USER SAID: {event.item.text_content} (response delay: {response_delay:.2f}s)")
+                else:
+                    print(f"🎤 USER SAID: {event.item.text_content}")
+                
+                # Update timing for next bot response calculation
+                last_speech_end_time[0] = current_time
+                
+            elif event.item.role == 'assistant':
+                print(f"📝 Bot message added to chat: {event.item.text_content}")
+    
+    # Try to detect user speech start/stop (add debug to see what we get)
+    @session.on("user_input_transcribed")
+    def on_user_input_transcribed(event):
+        # Debug: Let's see what this event actually contains
+        print(f"🔧 Transcription event: is_final={getattr(event, 'is_final', 'unknown')}, transcript='{getattr(event, 'transcript', 'unknown')}'")
+        
+        if hasattr(event, 'transcript') and hasattr(event, 'is_final'):
+            if not event.is_final and len(event.transcript.strip()) > 0:
+                print("🎤 User started speaking...")
+    
+    @session.on("user_state_changed")
+    def on_user_state_changed(event):
+        # Debug: Let's see what this event actually contains
+        print(f"🔧 User state event: {event}")
+        if hasattr(event, 'new_state'):
+            if event.new_state == 'speaking':
+                print("🎤 User started speaking... (via user_state_changed)")
+            elif event.new_state == 'listening':
+                print("🎤 User stopped speaking. (via user_state_changed)")
+
+    print("🔧 Speech event handlers added")
     print("✅ AI session initialized successfully")
     print("🎤 Listening for user input...")
     
-    # Start the session (the working pattern!)
+    # Start the session
     await session.start(agent=agent, room=ctx.room)
     
     # Send welcome message
