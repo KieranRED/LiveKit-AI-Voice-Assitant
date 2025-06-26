@@ -345,60 +345,46 @@ async def entrypoint(ctx: JobContext):
     
     print("🔧 Initializing AI components...")
     
-    # Initialize AI components with Groq STT if available
-    try:
-        if os.getenv("GROQ_API_KEY"):
-            session = AgentSession(
-                ctx=ctx,
-                model=lk_openai.LLM(
-                    model="gpt-4o-mini",
-                    api_key=os.getenv("OPENAI_API_KEY"),
-                ),
-                stt=GroqSTT(model="distil-whisper-large-v3-en"), # 🚀 240x faster than real-time!
-                tts=lk_openai.TTS(
-                    model="tts-1",
-                    voice="nova",
-                    api_key=os.getenv("OPENAI_API_KEY"),
-                ),
-                chat_ctx=lk_openai.ChatContext().with_system_message(
-                    content=prompt,
-                    instruction=voice_instructions
-                ),
-            )
-            print("🚀 Using Groq STT for ultra-fast speech recognition!")
-        else:
-            # Fallback to OpenAI STT
-            session = AgentSession(
-                ctx=ctx,
-                model=lk_openai.LLM(
-                    model="gpt-4o-mini",
-                    api_key=os.getenv("OPENAI_API_KEY"),
-                ),
-                stt=lk_openai.STT(
-                    model="whisper-1",
-                    api_key=os.getenv("OPENAI_API_KEY"),
-                ),
-                tts=lk_openai.TTS(
-                    model="tts-1",
-                    voice="nova",
-                    api_key=os.getenv("OPENAI_API_KEY"),
-                ),
-                chat_ctx=lk_openai.ChatContext().with_system_message(
-                    content=prompt,
-                    instruction=voice_instructions
-                ),
-            )
-            print("📢 Using OpenAI STT (slower fallback)")
-        
-        print("✅ AI session initialized successfully")
-        print("🎤 Listening for user input...")
-        
-        # Start the session
-        await session.start()
-        
-    except Exception as e:
-        print(f"❌ Error initializing session: {e}")
-        raise e
+    # Create the agent with instructions (the working pattern!)
+    agent = Agent(
+        instructions=prompt,
+    )
+    
+    # Create the session with individual components (like your working version)
+    if os.getenv("GROQ_API_KEY"):
+        session = AgentSession(
+            vad=silero.VAD.load(),
+            stt=GroqSTT(model="distil-whisper-large-v3-en"), # 🚀 240x faster than real-time!
+            llm=lk_openai.LLM(model="gpt-4o-mini"),
+            tts=lk_openai.TTS(),
+        )
+        print("🚀 Using Groq STT for ultra-fast speech recognition!")
+    else:
+        # Fallback to OpenAI STT
+        session = AgentSession(
+            vad=silero.VAD.load(),
+            stt=lk_openai.STT(),
+            llm=lk_openai.LLM(model="gpt-4o-mini"),
+            tts=lk_openai.TTS(),
+        )
+        print("📢 Using OpenAI STT (slower fallback)")
+    
+    print("✅ AI session initialized successfully")
+    print("🎤 Listening for user input...")
+    
+    # Start the session (the working pattern!)
+    await session.start(agent=agent, room=ctx.room)
+    
+    # Send welcome message
+    print("🗣️ Sending welcome message...")
+    await session.say("Hey! Can you hear me clearly?", allow_interruptions=True)
+    
+    print("🎉 Sales bot ready! Conversation active...")
+    
+    # Keep the session alive
+    while True:
+        await asyncio.sleep(30)
+        print("💓 Bot running...")
 
 
 if __name__ == "__main__":
