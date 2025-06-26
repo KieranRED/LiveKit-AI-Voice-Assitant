@@ -474,6 +474,8 @@ async def entrypoint(ctx: JobContext):
                         print(f"   📊 Breakdown: STT={stt_time:.2f}s + LLM={llm_time:.2f}s + TTS={tts_gen_time:.2f}s + Audio≈{estimated_audio_delay:.1f}s")
                 else:
                     print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}]")
+                else:
+                    print(f"🤖 BOT SPEAKING [ACTUAL-{conversation_count[0]:02d}]")
                     
             elif event.old_state == 'speaking' and event.new_state != 'speaking':
                 print("🤖 Bot finished speaking. Ready for next input...")
