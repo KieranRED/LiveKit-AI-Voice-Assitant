@@ -1,9 +1,31 @@
+"""
+LiveKit AI Sales Bot with Azure Speech Services TTS Integration
+
+SETUP INSTRUCTIONS:
+1. Install Azure Speech SDK: pip install azure-cognitiveservices-speech
+2. Set environment variables:
+   - AZURE_SPEECH_API_KEY=your_azure_speech_api_key
+   - AZURE_SPEECH_REGION=your_region (e.g., eastus, westus2, etc.)
+   
+3. Get Azure Speech credentials:
+   - Go to https://portal.azure.com
+   - Create "Speech Services" resource
+   - Copy API Key and Region from resource page
+
+VOICE OPTIONS:
+- en-US-AriaNeural (Professional female - recommended)
+- en-US-DavisNeural (Confident male)
+- en-US-JennyNeural (Conversational female)
+- en-US-GuyNeural (Casual male)
+"""
+
 import asyncio
 import os
 import time
 import json
 import wave
 import tempfile
+import io
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -13,14 +35,147 @@ from groq import Groq
 from livekit import agents, rtc
 from livekit.agents import JobContext, WorkerOptions, cli, AgentSession, Agent
 from livekit.agents.stt import STT, SpeechEvent, SpeechEventType, STTCapabilities, SpeechData
+from livekit.agents.tts import TTS, TTSCapabilities, SynthesizedAudio
 from livekit.plugins import openai as lk_openai, silero
+
+# Azure Speech Services imports
+import azure.cognitiveservices.speech as speechsdk
+
+
+# Custom Azure TTS Implementation for LiveKit
+class AzureTTS(TTS):
+    """Custom Azure Speech Services TTS implementation for LiveKit"""
+    
+    def __init__(
+        self,
+        api_key: str,
+        region: str,
+        voice: str = "en-US-AriaNeural",
+        speed: float = 1.0,
+        streaming: bool = True
+    ):
+        super().__init__(
+            capabilities=TTSCapabilities(streaming=streaming)
+        )
+        
+        self._api_key = api_key
+        self._region = region
+        self._voice = voice
+        self._speed = speed
+        self._streaming = streaming
+        
+        # Initialize Azure Speech Config
+        self._speech_config = speechsdk.SpeechConfig(
+            subscription=api_key, 
+            region=region
+        )
+        self._speech_config.speech_synthesis_voice_name = voice
+        self._speech_config.set_speech_synthesis_output_format(
+            speechsdk.SpeechSynthesisOutputFormat.Audio48Khz16BitMonoPcm
+        )
+        
+        # Set speech rate if different from 1.0
+        if speed != 1.0:
+            speed_percentage = int((speed - 1.0) * 100)
+            if speed_percentage > 0:
+                speed_str = f"+{speed_percentage}%"
+            else:
+                speed_str = f"{speed_percentage}%"
+            
+            # SSML for speed control
+            self._speech_config.set_property(
+                speechsdk.PropertyId.SpeechServiceConnection_SynthEnableCompressedAudioTransmission, 
+                "true"
+            )
+        
+        print(f"🔵 Azure TTS initialized with voice: {voice}, speed: {speed}")
+    
+    async def _synthesize_impl(self, text: str) -> SynthesizedAudio:
+        """Synthesize text to speech using Azure Speech Services"""
+        try:
+            start_time = time.time()
+            
+            # Apply speed control via SSML if needed
+            if self._speed != 1.0:
+                speed_percentage = int((self._speed - 1.0) * 100)
+                if speed_percentage > 0:
+                    speed_str = f"+{speed_percentage}%"
+                else:
+                    speed_str = f"{speed_percentage}%"
+                
+                ssml_text = f"""
+                <speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
+                    <voice name="{self._voice}">
+                        <prosody rate="{speed_str}">
+                            {text}
+                        </prosody>
+                    </voice>
+                </speak>
+                """
+            else:
+                ssml_text = text
+            
+            # Create synthesizer with in-memory audio output
+            audio_output = speechsdk.audio.AudioOutputConfig(use_default_speaker=False)
+            synthesizer = speechsdk.SpeechSynthesizer(
+                speech_config=self._speech_config, 
+                audio_config=audio_output
+            )
+            
+            # Perform synthesis
+            if self._speed != 1.0:
+                result = await asyncio.to_thread(synthesizer.speak_ssml_async, ssml_text)
+                speech_synthesis_result = result.get()
+            else:
+                result = await asyncio.to_thread(synthesizer.speak_text_async, text)
+                speech_synthesis_result = result.get()
+            
+            processing_time = time.time() - start_time
+            
+            if speech_synthesis_result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+                # Convert audio data to the format LiveKit expects
+                audio_data = speech_synthesis_result.audio_data
+                
+                print(f"🔵 Azure TTS: Generated {len(audio_data)} bytes in {processing_time:.3f}s")
+                
+                # Return SynthesizedAudio object
+                return SynthesizedAudio(
+                    text=text,
+                    data=audio_data,
+                    sample_rate=48000,  # Azure returns 48kHz
+                    num_channels=1
+                )
+            
+            elif speech_synthesis_result.reason == speechsdk.ResultReason.Canceled:
+                cancellation_details = speechsdk.CancellationDetails.from_result(speech_synthesis_result)
+                error_msg = f"Speech synthesis canceled: {cancellation_details.reason}"
+                if cancellation_details.reason == speechsdk.CancellationReason.Error:
+                    error_msg += f" Error details: {cancellation_details.error_details}"
+                raise Exception(error_msg)
+                
+            else:
+                raise Exception(f"Unexpected synthesis result: {speech_synthesis_result.reason}")
+                
+        except Exception as e:
+            print(f"❌ Azure TTS Error: {e}")
+            # Return empty audio on error
+            return SynthesizedAudio(
+                text=text,
+                data=b"",
+                sample_rate=48000,
+                num_channels=1
+            )
+        finally:
+            # Clean up synthesizer
+            if 'synthesizer' in locals():
+                del synthesizer
 
 
 # Check environment variables at startup
 def check_env_vars():
     """Check if all required environment variables are present"""
     required_vars = ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE", "SESSION_ID"]
-    optional_vars = ["GROQ_API_KEY"]
+    optional_vars = ["GROQ_API_KEY", "AZURE_SPEECH_API_KEY", "AZURE_SPEECH_REGION"]
     
     print("🔍 Environment Check:")
     all_good = True
@@ -361,23 +516,41 @@ async def entrypoint(ctx: JobContext):
     )
     
     # Create the session with individual components
-    if os.getenv("GROQ_API_KEY"):
+    azure_api_key = os.getenv("AZURE_SPEECH_API_KEY")
+    azure_region = os.getenv("AZURE_SPEECH_REGION", "eastus")
+    
+    if os.getenv("GROQ_API_KEY") and azure_api_key:
         session = AgentSession(
             vad=silero.VAD.load(),
             stt=GroqSTT(model="distil-whisper-large-v3-en"), # 🚀 240x faster than real-time!
-            llm=lk_openai.LLM(model="gpt-4.1-nano"),
-            tts=lk_openai.TTS(),
+            llm=lk_openai.LLM(model="gpt-4o-mini"),
+            tts=AzureTTS(
+                api_key=azure_api_key,
+                region=azure_region,
+                voice="en-US-AriaNeural",  # Professional female voice
+                speed=1.1,                 # 10% faster speech
+                streaming=True
+            ),
         )
-        print("🚀 Using Groq STT for ultra-fast speech recognition!")
+        print("🚀 Using Groq STT + Azure TTS for ultra-fast speech processing!")
+    elif os.getenv("GROQ_API_KEY"):
+        # Fallback to OpenAI TTS if Azure not configured
+        session = AgentSession(
+            vad=silero.VAD.load(),
+            stt=GroqSTT(model="distil-whisper-large-v3-en"),
+            llm=lk_openai.LLM(model="gpt-4o-mini"),
+            tts=lk_openai.TTS(voice="alloy", speed=1.1),
+        )
+        print("🚀 Using Groq STT + OpenAI TTS (Azure TTS not configured)")
     else:
-        # Fallback to OpenAI STT
+        # Full fallback to OpenAI
         session = AgentSession(
             vad=silero.VAD.load(),
             stt=lk_openai.STT(),
-            llm=lk_openai.LLM(model="gpt-4.1-nano"),
-            tts=lk_openai.TTS(),
+            llm=lk_openai.LLM(model="gpt-4o-mini"),
+            tts=lk_openai.TTS(voice="alloy", speed=1.1),
         )
-        print("📢 Using OpenAI STT (slower fallback)")
+        print("📢 Using OpenAI STT + TTS (Groq and Azure not configured)")
     
     # COMPREHENSIVE DELAY MEASUREMENT SYSTEM
     conversation_count = [0]
