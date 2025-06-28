@@ -74,23 +74,9 @@ class AzureTTS(TTS):
             speechsdk.SpeechSynthesisOutputFormat.Audio48Khz16BitMonoPcm
         )
         
-        # Set speech rate if different from 1.0
-        if speed != 1.0:
-            speed_percentage = int((speed - 1.0) * 100)
-            if speed_percentage > 0:
-                speed_str = f"+{speed_percentage}%"
-            else:
-                speed_str = f"{speed_percentage}%"
-            
-            # SSML for speed control
-            self._speech_config.set_property(
-                speechsdk.PropertyId.SpeechServiceConnection_SynthEnableCompressedAudioTransmission, 
-                "true"
-            )
-        
         print(f"🔵 Azure TTS initialized with voice: {voice}, speed: {speed}")
     
-    async def _synthesize_impl(self, text: str) -> SynthesizedAudio:
+    async def synthesize(self, text: str) -> SynthesizedAudio:
         """Synthesize text to speech using Azure Speech Services"""
         try:
             start_time = time.time()
