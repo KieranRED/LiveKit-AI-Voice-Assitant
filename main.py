@@ -181,6 +181,10 @@ class AzureStreamingTTS(TTS):
             print(f"❌ Azure WebSocket streaming error: {e}")
             raise
     
+    def stream(self):
+        """LiveKit streaming interface - returns async context manager"""
+        return AzureStreamContext(self)
+    
     async def synthesize(self, text: str) -> SynthesizedAudio:
         """Synthesize speech with streaming support"""
         try:
@@ -218,6 +222,56 @@ class AzureStreamingTTS(TTS):
                 sample_rate=48000,
                 num_channels=1
             )
+
+
+class AzureStreamContext:
+    """Async context manager for Azure TTS streaming (LiveKit interface)"""
+    
+    def __init__(self, tts: AzureStreamingTTS):
+        self._tts = tts
+        self._stream_generator = None
+    
+    async def __aenter__(self):
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self._stream_generator:
+            await self._stream_generator.aclose()
+    
+    async def synthesize(self, text: str):
+        """Start streaming synthesis"""
+        print(f"🔵 Azure Stream: Starting synthesis for: '{text[:50]}...'")
+        start_time = time.time()
+        
+        try:
+            first_chunk_sent = False
+            async for chunk in self._tts._stream_synthesis(text):
+                if chunk and len(chunk) > 0:
+                    # Create audio frame from chunk
+                    audio_frame = rtc.AudioFrame(
+                        data=chunk,
+                        sample_rate=48000,
+                        num_channels=1,
+                        samples_per_channel=len(chunk) // 2  # 16-bit audio
+                    )
+                    
+                    if not first_chunk_sent:
+                        first_chunk_time = time.time() - start_time
+                        print(f"🔵 Azure Stream: First chunk ready in {first_chunk_time:.3f}s")
+                        first_chunk_sent = True
+                    
+                    yield audio_frame
+                    
+        except Exception as e:
+            print(f"❌ Azure Stream Error: {e}")
+            # Yield empty frame on error
+            empty_frame = rtc.AudioFrame(
+                data=b"",
+                sample_rate=48000,
+                num_channels=1,
+                samples_per_channel=0
+            )
+            yield empty_frame
 
 
 # Check environment variables at startup
