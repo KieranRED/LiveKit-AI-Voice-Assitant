@@ -1,5 +1,5 @@
 """
-LiveKit AI Sales Bot with Azure Speech Services TTS Integration
+LiveKit AI Sales Bot with Azure Speech Services TTS Integration (FIXED VERSION)
 
 SETUP INSTRUCTIONS:
 1. Install Azure Speech SDK: pip install azure-cognitiveservices-speech
@@ -42,7 +42,7 @@ from livekit.plugins import openai as lk_openai, silero
 import azure.cognitiveservices.speech as speechsdk
 
 
-# Custom Azure TTS Implementation for LiveKit
+# Custom Azure TTS Implementation for LiveKit (FIXED VERSION)
 class AzureTTS(TTS):
     """Custom Azure Speech Services TTS implementation for LiveKit"""
     
@@ -72,11 +72,20 @@ class AzureTTS(TTS):
             region=region
         )
         self._speech_config.speech_synthesis_voice_name = voice
+        
+        # FIX: Use the correct format name - Raw48Khz16BitMonoPcm instead of Audio48Khz16BitMonoPcm
         self._speech_config.set_speech_synthesis_output_format(
-            speechsdk.SpeechSynthesisOutputFormat.Audio48Khz16BitMonoPcm
+            speechsdk.SpeechSynthesisOutputFormat.Raw48Khz16BitMonoPcm
         )
         
-        print(f"🔵 Azure TTS initialized with voice: {voice}, speed: {speed}")
+        # Test the configuration
+        try:
+            test_synthesizer = speechsdk.SpeechSynthesizer(speech_config=self._speech_config)
+            test_synthesizer = None  # Clean up
+            print(f"🔵 Azure TTS initialized with voice: {voice}, speed: {speed}")
+        except Exception as e:
+            print(f"❌ Azure TTS initialization failed: {e}")
+            raise
     
     async def synthesize(self, text: str) -> SynthesizedAudio:
         """Synthesize text to speech using Azure Speech Services"""
@@ -103,60 +112,67 @@ class AzureTTS(TTS):
             else:
                 ssml_text = text
             
-            # Create synthesizer with in-memory audio output
-            audio_output = speechsdk.audio.AudioOutputConfig(use_default_speaker=False)
+            # FIX: Create synthesizer with no audio output (we'll get raw data)
+            audio_config = speechsdk.audio.AudioOutputConfig(use_default_speaker=False)
             synthesizer = speechsdk.SpeechSynthesizer(
                 speech_config=self._speech_config, 
-                audio_config=audio_output
+                audio_config=audio_config
             )
             
-            # Perform synthesis
-            if self._speed != 1.0:
-                result = await asyncio.to_thread(synthesizer.speak_ssml_async, ssml_text)
-                speech_synthesis_result = result.get()
-            else:
-                result = await asyncio.to_thread(synthesizer.speak_text_async, text)
-                speech_synthesis_result = result.get()
-            
-            processing_time = time.time() - start_time
-            
-            if speech_synthesis_result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-                # Convert audio data to the format LiveKit expects
-                audio_data = speech_synthesis_result.audio_data
+            try:
+                # FIX: Improved async handling
+                if self._speed != 1.0:
+                    # Use SSML for speed control
+                    result_future = synthesizer.speak_ssml_async(ssml_text)
+                else:
+                    # Use plain text
+                    result_future = synthesizer.speak_text_async(text)
                 
-                print(f"🔵 Azure TTS: Generated {len(audio_data)} bytes in {processing_time:.3f}s")
+                # Await the result properly
+                speech_synthesis_result = await asyncio.to_thread(result_future.get)
                 
-                # Return SynthesizedAudio object
-                return SynthesizedAudio(
-                    text=text,
-                    data=audio_data,
-                    sample_rate=48000,  # Azure returns 48kHz
-                    num_channels=1
-                )
-            
-            elif speech_synthesis_result.reason == speechsdk.ResultReason.Canceled:
-                cancellation_details = speechsdk.CancellationDetails.from_result(speech_synthesis_result)
-                error_msg = f"Speech synthesis canceled: {cancellation_details.reason}"
-                if cancellation_details.reason == speechsdk.CancellationReason.Error:
-                    error_msg += f" Error details: {cancellation_details.error_details}"
-                raise Exception(error_msg)
+                processing_time = time.time() - start_time
                 
-            else:
-                raise Exception(f"Unexpected synthesis result: {speech_synthesis_result.reason}")
+                if speech_synthesis_result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+                    # Get the raw audio data
+                    audio_data = speech_synthesis_result.audio_data
+                    
+                    print(f"🔵 Azure TTS: Generated {len(audio_data)} bytes in {processing_time:.3f}s")
+                    
+                    # Return SynthesizedAudio object with proper format
+                    return SynthesizedAudio(
+                        text=text,
+                        data=audio_data,
+                        sample_rate=48000,  # Azure returns 48kHz
+                        num_channels=1
+                    )
+                
+                elif speech_synthesis_result.reason == speechsdk.ResultReason.Canceled:
+                    cancellation_details = speechsdk.CancellationDetails.from_result(speech_synthesis_result)
+                    error_msg = f"Speech synthesis canceled: {cancellation_details.reason}"
+                    if cancellation_details.reason == speechsdk.CancellationReason.Error:
+                        error_msg += f" Error details: {cancellation_details.error_details}"
+                    print(f"❌ Azure TTS Error: {error_msg}")
+                    raise Exception(error_msg)
+                    
+                else:
+                    error_msg = f"Unexpected synthesis result: {speech_synthesis_result.reason}"
+                    print(f"❌ Azure TTS Error: {error_msg}")
+                    raise Exception(error_msg)
+                    
+            finally:
+                # Clean up synthesizer properly
+                synthesizer = None
                 
         except Exception as e:
             print(f"❌ Azure TTS Error: {e}")
-            # Return empty audio on error
+            # Return empty audio on error to prevent crashes
             return SynthesizedAudio(
                 text=text,
                 data=b"",
                 sample_rate=48000,
                 num_channels=1
             )
-        finally:
-            # Clean up synthesizer
-            if 'synthesizer' in locals():
-                del synthesizer
 
 
 # Check environment variables at startup
@@ -503,42 +519,47 @@ async def entrypoint(ctx: JobContext):
         instructions=prompt,
     )
     
-    # Create the session with individual components
+    # Create the session with individual components with fallback mechanism
     azure_api_key = os.getenv("AZURE_SPEECH_API_KEY")
     azure_region = os.getenv("AZURE_SPEECH_REGION", "eastus")
     
-    if os.getenv("GROQ_API_KEY") and azure_api_key:
-        session = AgentSession(
-            vad=silero.VAD.load(),
-            stt=GroqSTT(model="distil-whisper-large-v3-en"), # 🚀 240x faster than real-time!
-            llm=lk_openai.LLM(model="gpt-4o-mini"),
-            tts=AzureTTS(
+    # Initialize TTS with fallback
+    tts_engine = None
+    if azure_api_key:
+        try:
+            tts_engine = AzureTTS(
                 api_key=azure_api_key,
                 region=azure_region,
                 voice="en-US-AriaNeural",  # Professional female voice
                 speed=1.1,                 # 10% faster speech
                 streaming=True
-            ),
-        )
-        print("🚀 Using Groq STT + Azure TTS for ultra-fast speech processing!")
-    elif os.getenv("GROQ_API_KEY"):
-        # Fallback to OpenAI TTS if Azure not configured
+            )
+            print("🚀 Using Azure TTS for high-quality speech!")
+        except Exception as e:
+            print(f"⚠️ Azure TTS failed, falling back to OpenAI: {e}")
+            tts_engine = lk_openai.TTS(voice="alloy", speed=1.1)
+    else:
+        print("⚠️ Azure TTS not configured, using OpenAI TTS")
+        tts_engine = lk_openai.TTS(voice="alloy", speed=1.1)
+    
+    # Initialize session with proper components
+    if os.getenv("GROQ_API_KEY"):
         session = AgentSession(
             vad=silero.VAD.load(),
-            stt=GroqSTT(model="distil-whisper-large-v3-en"),
+            stt=GroqSTT(model="distil-whisper-large-v3-en"), # 🚀 240x faster than real-time!
             llm=lk_openai.LLM(model="gpt-4o-mini"),
-            tts=lk_openai.TTS(voice="alloy", speed=1.1),
+            tts=tts_engine,
         )
-        print("🚀 Using Groq STT + OpenAI TTS (Azure TTS not configured)")
+        print("🚀 Using Groq STT + Azure/OpenAI TTS for ultra-fast speech processing!")
     else:
         # Full fallback to OpenAI
         session = AgentSession(
             vad=silero.VAD.load(),
             stt=lk_openai.STT(),
             llm=lk_openai.LLM(model="gpt-4o-mini"),
-            tts=lk_openai.TTS(voice="alloy", speed=1.1),
+            tts=tts_engine,
         )
-        print("📢 Using OpenAI STT + TTS (Groq and Azure not configured)")
+        print("📢 Using OpenAI STT + TTS (Groq not configured)")
     
     # COMPREHENSIVE DELAY MEASUREMENT SYSTEM
     conversation_count = [0]
