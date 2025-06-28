@@ -55,7 +55,7 @@ class AzureStreamingTTS(TTS):
         region: str,
         voice: str = "en-US-AriaNeural",
         speed: float = 1.0,
-        streaming: bool = True
+        streaming: bool = False  # Disable streaming for now, use regular synthesis
     ):
         super().__init__(
             capabilities=TTSCapabilities(streaming=streaming),
@@ -137,8 +137,8 @@ class AzureStreamingTTS(TTS):
         
         return message
     
-    async def _stream_synthesis(self, text: str) -> AsyncGenerator[bytes, None]:
-        """Stream audio synthesis using Azure WebSocket"""
+    async def _websocket_synthesis(self, text: str) -> bytes:
+        """Fast WebSocket synthesis (non-streaming for now)"""
         access_token = await self._get_access_token()
         request_id = str(uuid.uuid4()).replace('-', '')
         
@@ -159,7 +159,8 @@ class AzureStreamingTTS(TTS):
                 ssml_msg = self._create_ssml_message(request_id, ssml)
                 await websocket.send(ssml_msg)
                 
-                # Receive audio chunks
+                # Collect all audio chunks
+                audio_chunks = []
                 async for message in websocket:
                     if isinstance(message, str):
                         # Text message (metadata)
@@ -175,37 +176,24 @@ class AzureStreamingTTS(TTS):
                         if header_end != -1:
                             audio_chunk = message[header_end + 4:]
                             if audio_chunk:
-                                yield audio_chunk
+                                audio_chunks.append(audio_chunk)
+                
+                return b"".join(audio_chunks)
                 
         except Exception as e:
-            print(f"❌ Azure WebSocket streaming error: {e}")
+            print(f"❌ Azure WebSocket error: {e}")
             raise
     
-    def stream(self):
-        """LiveKit streaming interface - returns async context manager"""
-        return AzureStreamContext(self)
-    
     async def synthesize(self, text: str) -> SynthesizedAudio:
-        """Synthesize speech with streaming support"""
+        """Synthesize speech using faster WebSocket approach"""
         try:
             start_time = time.time()
-            audio_chunks = []
-            first_chunk_time = None
             
-            # Stream the audio
-            async for chunk in self._stream_synthesis(text):
-                audio_chunks.append(chunk)
-                
-                # Record time to first chunk (streaming performance indicator)
-                if len(audio_chunks) == 1:
-                    first_chunk_time = time.time() - start_time
-                    print(f"🔵 Azure Streaming: First chunk in {first_chunk_time:.3f}s")
+            # Use WebSocket for faster synthesis
+            audio_data = await self._websocket_synthesis(text)
             
-            # Combine all chunks
-            audio_data = b"".join(audio_chunks)
-            total_time = time.time() - start_time
-            
-            print(f"🔵 Azure Streaming TTS: Complete {len(audio_data)} bytes in {total_time:.3f}s")
+            processing_time = time.time() - start_time
+            print(f"🔵 Azure WebSocket TTS: Generated {len(audio_data)} bytes in {processing_time:.3f}s")
             
             return SynthesizedAudio(
                 text=text,
@@ -215,7 +203,7 @@ class AzureStreamingTTS(TTS):
             )
             
         except Exception as e:
-            print(f"❌ Azure Streaming TTS Error: {e}")
+            print(f"❌ Azure TTS Error: {e}")
             return SynthesizedAudio(
                 text=text,
                 data=b"",
@@ -223,55 +211,6 @@ class AzureStreamingTTS(TTS):
                 num_channels=1
             )
 
-
-class AzureStreamContext:
-    """Async context manager for Azure TTS streaming (LiveKit interface)"""
-    
-    def __init__(self, tts: AzureStreamingTTS):
-        self._tts = tts
-        self._stream_generator = None
-    
-    async def __aenter__(self):
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self._stream_generator:
-            await self._stream_generator.aclose()
-    
-    async def synthesize(self, text: str):
-        """Start streaming synthesis"""
-        print(f"🔵 Azure Stream: Starting synthesis for: '{text[:50]}...'")
-        start_time = time.time()
-        
-        try:
-            first_chunk_sent = False
-            async for chunk in self._tts._stream_synthesis(text):
-                if chunk and len(chunk) > 0:
-                    # Create audio frame from chunk
-                    audio_frame = rtc.AudioFrame(
-                        data=chunk,
-                        sample_rate=48000,
-                        num_channels=1,
-                        samples_per_channel=len(chunk) // 2  # 16-bit audio
-                    )
-                    
-                    if not first_chunk_sent:
-                        first_chunk_time = time.time() - start_time
-                        print(f"🔵 Azure Stream: First chunk ready in {first_chunk_time:.3f}s")
-                        first_chunk_sent = True
-                    
-                    yield audio_frame
-                    
-        except Exception as e:
-            print(f"❌ Azure Stream Error: {e}")
-            # Yield empty frame on error
-            empty_frame = rtc.AudioFrame(
-                data=b"",
-                sample_rate=48000,
-                num_channels=1,
-                samples_per_channel=0
-            )
-            yield empty_frame
 
 
 # Check environment variables at startup
@@ -631,11 +570,11 @@ async def entrypoint(ctx: JobContext):
                 region=azure_region,
                 voice="en-US-AriaNeural",  # Professional female voice
                 speed=1.1,                 # 10% faster speech
-                streaming=True             # True WebSocket streaming!
+                streaming=False            # Disable streaming for now to get basic working
             )
-            print("🚀 Using Azure Streaming TTS for real-time speech!")
+            print("🚀 Using Azure WebSocket TTS for fast speech synthesis!")
         except Exception as e:
-            print(f"⚠️ Azure Streaming TTS failed, falling back to OpenAI: {e}")
+            print(f"⚠️ Azure TTS failed, falling back to OpenAI: {e}")
             tts_engine = lk_openai.TTS(voice="alloy", speed=1.1)
     else:
         print("⚠️ Azure TTS not configured, using OpenAI TTS")
@@ -649,7 +588,7 @@ async def entrypoint(ctx: JobContext):
             llm=lk_openai.LLM(model="gpt-4o-mini"),
             tts=tts_engine,
         )
-        print("🚀 Using Groq STT + Azure Streaming TTS for ultra-fast speech processing!")
+        print("🚀 Using Groq STT + Azure WebSocket TTS for ultra-fast speech processing!")
     else:
         # Full fallback to OpenAI
         session = AgentSession(
