@@ -55,7 +55,9 @@ class AzureTTS(TTS):
         streaming: bool = True
     ):
         super().__init__(
-            capabilities=TTSCapabilities(streaming=streaming)
+            capabilities=TTSCapabilities(streaming=streaming),
+            sample_rate=48000,  # Azure Speech Services uses 48kHz
+            num_channels=1      # Mono audio
         )
         
         self._api_key = api_key
