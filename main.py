@@ -26,25 +26,28 @@ import json
 import wave
 import tempfile
 import io
+import uuid
+import struct
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, AsyncGenerator
 
 import openai
 import httpx
 from groq import Groq
+import websockets
+import aiohttp
 from livekit import agents, rtc
 from livekit.agents import JobContext, WorkerOptions, cli, AgentSession, Agent
 from livekit.agents.stt import STT, SpeechEvent, SpeechEventType, STTCapabilities, SpeechData
 from livekit.agents.tts import TTS, TTSCapabilities, SynthesizedAudio
 from livekit.plugins import openai as lk_openai, silero
 
-# Azure Speech Services imports
-import azure.cognitiveservices.speech as speechsdk
+# Azure Speech Services WebSocket streaming implementation
 
 
-# Custom Azure TTS Implementation for LiveKit (FIXED VERSION)
-class AzureTTS(TTS):
-    """Custom Azure Speech Services TTS implementation for LiveKit"""
+# Azure Streaming TTS Implementation using WebSocket API
+class AzureStreamingTTS(TTS):
+    """Azure Speech Services TTS with WebSocket streaming support"""
     
     def __init__(
         self,
@@ -56,117 +59,159 @@ class AzureTTS(TTS):
     ):
         super().__init__(
             capabilities=TTSCapabilities(streaming=streaming),
-            sample_rate=48000,  # Azure Speech Services uses 48kHz
-            num_channels=1      # Mono audio
+            sample_rate=48000,
+            num_channels=1
         )
         
         self._api_key = api_key
         self._region = region
         self._voice = voice
         self._speed = speed
-        self._streaming = streaming
         
-        # Initialize Azure Speech Config
-        self._speech_config = speechsdk.SpeechConfig(
-            subscription=api_key, 
-            region=region
-        )
-        self._speech_config.speech_synthesis_voice_name = voice
+        # Azure WebSocket endpoints
+        self._token_url = f"https://{region}.api.cognitive.microsoft.com/sts/v1.0/issuetoken"
+        self._ws_url = f"wss://{region}.tts.speech.microsoft.com/cognitiveservices/websocket/v1"
         
-        # FIX: Use the correct format name - Raw48Khz16BitMonoPcm instead of Audio48Khz16BitMonoPcm
-        self._speech_config.set_speech_synthesis_output_format(
-            speechsdk.SpeechSynthesisOutputFormat.Raw48Khz16BitMonoPcm
-        )
+        # Validate inputs
+        if not api_key or not region:
+            raise ValueError("Azure API key and region are required")
         
-        # Test the configuration
+        print(f"🔵 Azure Streaming TTS initialized with voice: {voice}, speed: {speed}")
+    
+    async def _get_access_token(self) -> str:
+        """Get Azure access token"""
+        headers = {
+            'Ocp-Apim-Subscription-Key': self._api_key,
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self._token_url, headers=headers, timeout=10) as response:
+                if response.status != 200:
+                    raise Exception(f"Failed to get Azure token: {response.status}")
+                return await response.text()
+    
+    def _create_ssml(self, text: str) -> str:
+        """Create SSML with voice and speed settings"""
+        speed_rate = f"{self._speed:.1f}" if self._speed != 1.0 else "1.0"
+        
+        return f"""
+        <speak version='1.0' xml:lang='en-US' xmlns='http://www.w3.org/2001/10/synthesis'>
+            <voice xml:lang='en-US' name='{self._voice}'>
+                <prosody rate='{speed_rate}'>
+                    {text}
+                </prosody>
+            </voice>
+        </speak>
+        """.strip()
+    
+    def _create_config_message(self, request_id: str) -> str:
+        """Create WebSocket configuration message"""
+        config = {
+            "context": {
+                "synthesis": {
+                    "audio": {
+                        "metadataoptions": {
+                            "sentenceBoundaryEnabled": "false",
+                            "wordBoundaryEnabled": "false"
+                        },
+                        "outputFormat": "raw-48khz-16bit-mono-pcm"
+                    }
+                }
+            }
+        }
+        
+        message = f"X-RequestId:{request_id}\r\n"
+        message += "Content-Type:application/json; charset=utf-8\r\n"
+        message += f"Path:speech.config\r\n\r\n"
+        message += json.dumps(config)
+        
+        return message
+    
+    def _create_ssml_message(self, request_id: str, ssml: str) -> str:
+        """Create SSML message for WebSocket"""
+        message = f"X-RequestId:{request_id}\r\n"
+        message += "Content-Type:application/ssml+xml\r\n"
+        message += f"Path:ssml\r\n\r\n"
+        message += ssml
+        
+        return message
+    
+    async def _stream_synthesis(self, text: str) -> AsyncGenerator[bytes, None]:
+        """Stream audio synthesis using Azure WebSocket"""
+        access_token = await self._get_access_token()
+        request_id = str(uuid.uuid4()).replace('-', '')
+        
+        # WebSocket headers
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'X-ConnectionId': str(uuid.uuid4())
+        }
+        
         try:
-            test_synthesizer = speechsdk.SpeechSynthesizer(speech_config=self._speech_config)
-            test_synthesizer = None  # Clean up
-            print(f"🔵 Azure TTS initialized with voice: {voice}, speed: {speed}")
+            async with websockets.connect(self._ws_url, extra_headers=headers) as websocket:
+                # Send configuration
+                config_msg = self._create_config_message(request_id)
+                await websocket.send(config_msg)
+                
+                # Send SSML
+                ssml = self._create_ssml(text)
+                ssml_msg = self._create_ssml_message(request_id, ssml)
+                await websocket.send(ssml_msg)
+                
+                # Receive audio chunks
+                async for message in websocket:
+                    if isinstance(message, str):
+                        # Text message (metadata)
+                        if 'Path:turn.end' in message:
+                            break
+                        continue
+                    
+                    # Binary message (audio data)
+                    if isinstance(message, bytes):
+                        # Azure sends audio in chunks with headers
+                        # Skip the header and extract audio data
+                        header_end = message.find(b'\r\n\r\n')
+                        if header_end != -1:
+                            audio_chunk = message[header_end + 4:]
+                            if audio_chunk:
+                                yield audio_chunk
+                
         except Exception as e:
-            print(f"❌ Azure TTS initialization failed: {e}")
+            print(f"❌ Azure WebSocket streaming error: {e}")
             raise
     
     async def synthesize(self, text: str) -> SynthesizedAudio:
-        """Synthesize text to speech using Azure Speech Services"""
+        """Synthesize speech with streaming support"""
         try:
             start_time = time.time()
+            audio_chunks = []
+            first_chunk_time = None
             
-            # Apply speed control via SSML if needed
-            if self._speed != 1.0:
-                speed_percentage = int((self._speed - 1.0) * 100)
-                if speed_percentage > 0:
-                    speed_str = f"+{speed_percentage}%"
-                else:
-                    speed_str = f"{speed_percentage}%"
+            # Stream the audio
+            async for chunk in self._stream_synthesis(text):
+                audio_chunks.append(chunk)
                 
-                ssml_text = f"""
-                <speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
-                    <voice name="{self._voice}">
-                        <prosody rate="{speed_str}">
-                            {text}
-                        </prosody>
-                    </voice>
-                </speak>
-                """
-            else:
-                ssml_text = text
+                # Record time to first chunk (streaming performance indicator)
+                if len(audio_chunks) == 1:
+                    first_chunk_time = time.time() - start_time
+                    print(f"🔵 Azure Streaming: First chunk in {first_chunk_time:.3f}s")
             
-            # FIX: Create synthesizer with no audio output (we'll get raw data)
-            audio_config = speechsdk.audio.AudioOutputConfig(use_default_speaker=False)
-            synthesizer = speechsdk.SpeechSynthesizer(
-                speech_config=self._speech_config, 
-                audio_config=audio_config
+            # Combine all chunks
+            audio_data = b"".join(audio_chunks)
+            total_time = time.time() - start_time
+            
+            print(f"🔵 Azure Streaming TTS: Complete {len(audio_data)} bytes in {total_time:.3f}s")
+            
+            return SynthesizedAudio(
+                text=text,
+                data=audio_data,
+                sample_rate=48000,
+                num_channels=1
             )
             
-            try:
-                # FIX: Improved async handling
-                if self._speed != 1.0:
-                    # Use SSML for speed control
-                    result_future = synthesizer.speak_ssml_async(ssml_text)
-                else:
-                    # Use plain text
-                    result_future = synthesizer.speak_text_async(text)
-                
-                # Await the result properly
-                speech_synthesis_result = await asyncio.to_thread(result_future.get)
-                
-                processing_time = time.time() - start_time
-                
-                if speech_synthesis_result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-                    # Get the raw audio data
-                    audio_data = speech_synthesis_result.audio_data
-                    
-                    print(f"🔵 Azure TTS: Generated {len(audio_data)} bytes in {processing_time:.3f}s")
-                    
-                    # Return SynthesizedAudio object with proper format
-                    return SynthesizedAudio(
-                        text=text,
-                        data=audio_data,
-                        sample_rate=48000,  # Azure returns 48kHz
-                        num_channels=1
-                    )
-                
-                elif speech_synthesis_result.reason == speechsdk.ResultReason.Canceled:
-                    cancellation_details = speechsdk.CancellationDetails.from_result(speech_synthesis_result)
-                    error_msg = f"Speech synthesis canceled: {cancellation_details.reason}"
-                    if cancellation_details.reason == speechsdk.CancellationReason.Error:
-                        error_msg += f" Error details: {cancellation_details.error_details}"
-                    print(f"❌ Azure TTS Error: {error_msg}")
-                    raise Exception(error_msg)
-                    
-                else:
-                    error_msg = f"Unexpected synthesis result: {speech_synthesis_result.reason}"
-                    print(f"❌ Azure TTS Error: {error_msg}")
-                    raise Exception(error_msg)
-                    
-            finally:
-                # Clean up synthesizer properly
-                synthesizer = None
-                
         except Exception as e:
-            print(f"❌ Azure TTS Error: {e}")
-            # Return empty audio on error to prevent crashes
+            print(f"❌ Azure Streaming TTS Error: {e}")
             return SynthesizedAudio(
                 text=text,
                 data=b"",
@@ -527,16 +572,16 @@ async def entrypoint(ctx: JobContext):
     tts_engine = None
     if azure_api_key:
         try:
-            tts_engine = AzureTTS(
+            tts_engine = AzureStreamingTTS(
                 api_key=azure_api_key,
                 region=azure_region,
                 voice="en-US-AriaNeural",  # Professional female voice
                 speed=1.1,                 # 10% faster speech
-                streaming=True
+                streaming=True             # True WebSocket streaming!
             )
-            print("🚀 Using Azure TTS for high-quality speech!")
+            print("🚀 Using Azure Streaming TTS for real-time speech!")
         except Exception as e:
-            print(f"⚠️ Azure TTS failed, falling back to OpenAI: {e}")
+            print(f"⚠️ Azure Streaming TTS failed, falling back to OpenAI: {e}")
             tts_engine = lk_openai.TTS(voice="alloy", speed=1.1)
     else:
         print("⚠️ Azure TTS not configured, using OpenAI TTS")
@@ -550,7 +595,7 @@ async def entrypoint(ctx: JobContext):
             llm=lk_openai.LLM(model="gpt-4o-mini"),
             tts=tts_engine,
         )
-        print("🚀 Using Groq STT + Azure/OpenAI TTS for ultra-fast speech processing!")
+        print("🚀 Using Groq STT + Azure Streaming TTS for ultra-fast speech processing!")
     else:
         # Full fallback to OpenAI
         session = AgentSession(
