@@ -195,9 +195,8 @@ class AzureStreamingTTS(TTS):
             processing_time = time.time() - start_time
             print(f"🔵 Azure WebSocket TTS: Generated {len(audio_data)} bytes in {processing_time:.3f}s")
             
-            # Yield the audio as a single chunk for LiveKit compatibility
+            # FIXED: Remove 'text' parameter that was causing the error
             synthesized_audio = SynthesizedAudio(
-                text=text,
                 data=audio_data,
                 sample_rate=48000,
                 num_channels=1
@@ -208,9 +207,8 @@ class AzureStreamingTTS(TTS):
             
         except Exception as e:
             print(f"❌ Azure TTS Error: {e}")
-            # Yield empty audio on error
+            # FIXED: Remove 'text' parameter from error case too
             yield SynthesizedAudio(
-                text=text,
                 data=b"",
                 sample_rate=48000,
                 num_channels=1
