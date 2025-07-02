@@ -176,10 +176,9 @@ class AzureStreamingTTS(TTS):
             
             print(f"🔵 Connecting to Azure WebSocket: {self._region}")
             
-            # Use proper WebSocket connection with timeout
+            # Use proper WebSocket connection without timeout parameter for compatibility
             async with websockets.connect(
                 uri, 
-                timeout=10,
                 extra_headers={
                     "User-Agent": "LiveKit-TTS/1.0"
                 }
