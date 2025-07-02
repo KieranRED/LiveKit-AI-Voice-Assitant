@@ -214,7 +214,7 @@ class AzureStreamingTTS(TTS):
                                 print("🔵 Turn started")
                             elif 'Path:turn.end' in message:
                                 print("🔵 Turn ended")
-                                break
+                                break  # This break is inside the while loop
                             elif 'Path:response' in message:
                                 print("🔵 Response message received")
                         
@@ -240,7 +240,7 @@ class AzureStreamingTTS(TTS):
                 
                 except asyncio.TimeoutError:
                     print("🔵 WebSocket timeout - ending collection")
-                    break
+                    # No break needed here since we're exiting the try block
                 
                 total_audio = b"".join(audio_chunks)
                 print(f"🔵 Total audio collected: {len(total_audio)} bytes from {len(audio_chunks)} chunks")
