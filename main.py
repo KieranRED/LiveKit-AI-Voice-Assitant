@@ -45,9 +45,9 @@ from livekit.plugins import openai as lk_openai, silero
 # Azure Speech Services WebSocket streaming implementation
 
 
-# Azure Streaming TTS Implementation using WebSocket API
+# Azure Streaming TTS Implementation using WebSocket API with OpenAI fallback
 class AzureStreamingTTS(TTS):
-    """Azure Speech Services TTS with WebSocket streaming support"""
+    """Azure Speech Services TTS with WebSocket streaming support and OpenAI fallback"""
     
     def __init__(
         self,
@@ -67,16 +67,43 @@ class AzureStreamingTTS(TTS):
         self._region = region
         self._voice = voice
         self._speed = speed
+        self._failed_requests = 0  # Track failures for fallback logic
+        self._max_failures = 3     # Switch to fallback after 3 failures
         
         # Azure WebSocket endpoints
         self._token_url = f"https://{region}.api.cognitive.microsoft.com/sts/v1.0/issuetoken"
         self._ws_url = f"wss://{region}.tts.speech.microsoft.com/cognitiveservices/websocket/v1"
+        
+        # Create OpenAI fallback
+        self._openai_fallback = None
+        try:
+            self._openai_fallback = lk_openai.TTS(voice="alloy", speed=speed)
+            print("🔄 OpenAI TTS fallback initialized")
+        except Exception as e:
+            print(f"⚠️ Failed to initialize OpenAI fallback: {e}")
         
         # Validate inputs
         if not api_key or not region:
             raise ValueError("Azure API key and region are required")
         
         print(f"🔵 Azure Streaming TTS initialized with voice: {voice}, speed: {speed}")
+    
+    async def _use_fallback(self, text: str, request_id: str):
+        """Use OpenAI TTS as fallback"""
+        if self._openai_fallback is None:
+            raise Exception("No fallback TTS available")
+        
+        print(f"🔄 Using OpenAI TTS fallback for: '{text[:50]}...'")
+        
+        # Use the OpenAI TTS synthesize method
+        async for result in self._openai_fallback.synthesize(text):
+            # Convert OpenAI result to our format
+            yield SynthesizedAudio(
+                frame=result.frame,
+                request_id=request_id,
+                is_final=result.is_final
+            )
+            return  # Only take the first result
     
     async def _get_access_token(self) -> str:
         """Get Azure access token"""
@@ -138,66 +165,138 @@ class AzureStreamingTTS(TTS):
         return message
     
     async def _websocket_synthesis(self, text: str) -> bytes:
-        """Fast WebSocket synthesis (non-streaming for now)"""
-        access_token = await self._get_access_token()
-        request_id = str(uuid.uuid4()).replace('-', '')
-        
+        """Fast WebSocket synthesis using Azure Speech Services WebSocket API"""
         try:
-            # Connect to WebSocket without extra_headers (use subprotocol approach instead)
-            uri = f"{self._ws_url}?Authorization=Bearer%20{access_token}&X-ConnectionId={str(uuid.uuid4())}"
+            access_token = await self._get_access_token()
+            request_id = str(uuid.uuid4()).replace('-', '')
+            connection_id = str(uuid.uuid4()).replace('-', '')
             
-            async with websockets.connect(uri) as websocket:
-                # Send configuration
+            # Correct Azure WebSocket URL format
+            uri = f"{self._ws_url}?Authorization=Bearer%20{access_token}&X-ConnectionId={connection_id}"
+            
+            print(f"🔵 Connecting to Azure WebSocket: {self._region}")
+            
+            # Use proper WebSocket connection with timeout
+            async with websockets.connect(
+                uri, 
+                timeout=10,
+                extra_headers={
+                    "User-Agent": "LiveKit-TTS/1.0"
+                }
+            ) as websocket:
+                print(f"🔵 Connected to Azure WebSocket")
+                
+                # Send configuration message
                 config_msg = self._create_config_message(request_id)
                 await websocket.send(config_msg)
+                print(f"🔵 Sent config message")
                 
-                # Send SSML
+                # Send SSML message
                 ssml = self._create_ssml(text)
                 ssml_msg = self._create_ssml_message(request_id, ssml)
                 await websocket.send(ssml_msg)
+                print(f"🔵 Sent SSML message: {len(text)} chars")
                 
-                # Collect all audio chunks
+                # Collect audio data with timeout
                 audio_chunks = []
-                async for message in websocket:
-                    if isinstance(message, str):
-                        # Text message (metadata)
-                        if 'Path:turn.end' in message:
-                            break
-                        continue
-                    
-                    # Binary message (audio data)
-                    if isinstance(message, bytes):
-                        # Azure sends audio in chunks with headers
-                        # Skip the header and extract audio data
-                        header_end = message.find(b'\r\n\r\n')
-                        if header_end != -1:
-                            audio_chunk = message[header_end + 4:]
-                            if audio_chunk:
-                                audio_chunks.append(audio_chunk)
+                received_turn_start = False
                 
-                return b"".join(audio_chunks)
+                try:
+                    while True:
+                        # Add timeout to prevent hanging
+                        message = await asyncio.wait_for(websocket.recv(), timeout=15.0)
+                        
+                        if isinstance(message, str):
+                            print(f"🔵 Received text message: {message[:100]}...")
+                            # Check for important path messages
+                            if 'Path:turn.start' in message:
+                                received_turn_start = True
+                                print("🔵 Turn started")
+                            elif 'Path:turn.end' in message:
+                                print("🔵 Turn ended")
+                                break
+                            elif 'Path:response' in message:
+                                print("🔵 Response message received")
+                        
+                        elif isinstance(message, bytes):
+                            print(f"🔵 Received binary message: {len(message)} bytes")
+                            # Parse binary message header
+                            try:
+                                header_end = message.find(b'\r\n\r\n')
+                                if header_end != -1:
+                                    header = message[:header_end].decode('utf-8')
+                                    audio_data = message[header_end + 4:]
+                                    
+                                    print(f"🔵 Header: {header}")
+                                    print(f"🔵 Audio data: {len(audio_data)} bytes")
+                                    
+                                    # Check if this is audio data
+                                    if 'Path:audio' in header and len(audio_data) > 0:
+                                        audio_chunks.append(audio_data)
+                                        print(f"🔵 Added audio chunk: {len(audio_data)} bytes")
+                                
+                            except Exception as parse_error:
+                                print(f"🔵 Error parsing binary message: {parse_error}")
                 
+                except asyncio.TimeoutError:
+                    print("🔵 WebSocket timeout - ending collection")
+                    break
+                
+                total_audio = b"".join(audio_chunks)
+                print(f"🔵 Total audio collected: {len(total_audio)} bytes from {len(audio_chunks)} chunks")
+                
+                return total_audio
+                
+        except websockets.exceptions.WebSocketException as e:
+            print(f"❌ Azure WebSocket connection error: {e}")
+            raise Exception(f"WebSocket connection failed: {e}")
         except Exception as e:
-            print(f"❌ Azure WebSocket error: {e}")
+            print(f"❌ Azure WebSocket synthesis error: {e}")
             raise
     
     async def synthesize(self, text: str, **kwargs):
-        """Synthesize speech using faster WebSocket approach - returns async generator for LiveKit compatibility"""
+        """Synthesize speech using Azure WebSocket with OpenAI fallback - returns async generator for LiveKit compatibility"""
         # Accept any additional kwargs that LiveKit might pass
         conn_options = kwargs.get('conn_options', None)
         request_id = str(uuid.uuid4())
         
+        # If we've had too many failures, use fallback immediately
+        if self._failed_requests >= self._max_failures:
+            print(f"🔄 Too many Azure failures ({self._failed_requests}), using OpenAI fallback")
+            if self._openai_fallback:
+                async for result in self._use_fallback(text, request_id):
+                    yield result
+                return
+        
         try:
             start_time = time.time()
             
-            # Use WebSocket for faster synthesis
+            # Try Azure WebSocket synthesis
             audio_data = await self._websocket_synthesis(text)
             
             processing_time = time.time() - start_time
             print(f"🔵 Azure WebSocket TTS: Generated {len(audio_data)} bytes in {processing_time:.3f}s")
             
-            # FIXED: Create AudioFrame first, then pass it to SynthesizedAudio
-            if len(audio_data) > 0:
+            # Check if we actually got audio data
+            if len(audio_data) == 0:
+                self._failed_requests += 1
+                print(f"⚠️ Azure TTS returned 0 bytes (failure #{self._failed_requests}) - trying fallback")
+                
+                if self._openai_fallback:
+                    async for result in self._use_fallback(text, request_id):
+                        yield result
+                    return
+                else:
+                    # Create empty frame if no fallback
+                    audio_frame = rtc.AudioFrame.create(
+                        sample_rate=self._sample_rate,
+                        num_channels=self._num_channels,
+                        samples_per_channel=0
+                    )
+            else:
+                # Success! Reset failure counter
+                self._failed_requests = 0
+                
                 # Calculate samples per channel for 16-bit audio
                 samples_per_channel = len(audio_data) // (self._num_channels * 2)  # 2 bytes per sample (16-bit)
                 
@@ -206,13 +305,6 @@ class AzureStreamingTTS(TTS):
                     sample_rate=self._sample_rate,
                     num_channels=self._num_channels,
                     samples_per_channel=samples_per_channel
-                )
-            else:
-                # Create empty frame for error case
-                audio_frame = rtc.AudioFrame.create(
-                    sample_rate=self._sample_rate,
-                    num_channels=self._num_channels,
-                    samples_per_channel=0
                 )
             
             synthesized_audio = SynthesizedAudio(
@@ -225,8 +317,21 @@ class AzureStreamingTTS(TTS):
             yield synthesized_audio
             
         except Exception as e:
-            print(f"❌ Azure TTS Error: {e}")
-            # Create empty AudioFrame for error case
+            self._failed_requests += 1
+            print(f"❌ Azure TTS Error (failure #{self._failed_requests}): {e}")
+            print(f"❌ Error type: {type(e).__name__}")
+            
+            # Try fallback on error
+            if self._openai_fallback:
+                print("🔄 Trying OpenAI fallback due to Azure error...")
+                try:
+                    async for result in self._use_fallback(text, request_id):
+                        yield result
+                    return
+                except Exception as fallback_error:
+                    print(f"❌ Fallback also failed: {fallback_error}")
+            
+            # If all else fails, create empty frame to prevent crashes
             empty_frame = rtc.AudioFrame.create(
                 sample_rate=self._sample_rate,
                 num_channels=self._num_channels,
@@ -601,7 +706,7 @@ async def entrypoint(ctx: JobContext):
             )
             print("🚀 Using Azure WebSocket TTS for fast speech synthesis!")
         except Exception as e:
-            print(f"⚠️ Azure TTS failed, falling back to OpenAI: {e}")
+            print(f"⚠️ Azure TTS initialization failed, falling back to OpenAI: {e}")
             tts_engine = lk_openai.TTS(voice="alloy", speed=1.1)
     else:
         print("⚠️ Azure TTS not configured, using OpenAI TTS")
