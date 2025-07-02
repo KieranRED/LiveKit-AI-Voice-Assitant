@@ -184,8 +184,8 @@ class AzureStreamingTTS(TTS):
             print(f"❌ Azure WebSocket error: {e}")
             raise
     
-    async def synthesize(self, text: str) -> SynthesizedAudio:
-        """Synthesize speech using faster WebSocket approach"""
+    async def synthesize(self, text: str, *, conn_options=None):
+        """Synthesize speech using faster WebSocket approach - returns async generator for LiveKit compatibility"""
         try:
             start_time = time.time()
             
@@ -195,16 +195,21 @@ class AzureStreamingTTS(TTS):
             processing_time = time.time() - start_time
             print(f"🔵 Azure WebSocket TTS: Generated {len(audio_data)} bytes in {processing_time:.3f}s")
             
-            return SynthesizedAudio(
+            # Yield the audio as a single chunk for LiveKit compatibility
+            synthesized_audio = SynthesizedAudio(
                 text=text,
                 data=audio_data,
                 sample_rate=48000,
                 num_channels=1
             )
             
+            # LiveKit expects an async generator, so yield the result
+            yield synthesized_audio
+            
         except Exception as e:
             print(f"❌ Azure TTS Error: {e}")
-            return SynthesizedAudio(
+            # Yield empty audio on error
+            yield SynthesizedAudio(
                 text=text,
                 data=b"",
                 sample_rate=48000,
