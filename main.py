@@ -233,17 +233,30 @@ class AzureStreamingTTS(TTS):
                                         audio_chunks.append(audio_data)
                                         print(f"🔵 Added audio chunk (no explicit audio path): {len(audio_data)} bytes")
                                 else:
-                                    # No header found, might be raw audio data
-                                    if len(message) > 0:
+                                    # No header found - check if this looks like raw PCM audio data
+                                    # Azure PCM audio should be large chunks and even-sized (16-bit samples)
+                                    if len(message) > 1000 and len(message) % 2 == 0:
                                         audio_chunks.append(message)
-                                        print(f"🔵 Added raw audio chunk: {len(message)} bytes")
+                                        print(f"🔵 Added raw PCM audio chunk: {len(message)} bytes")
+                                    elif len(message) > 1000:
+                                        # Odd-sized chunk, remove last byte to make it even
+                                        aligned_message = message[:-1]
+                                        audio_chunks.append(aligned_message)
+                                        print(f"🔵 Added aligned PCM audio chunk: {len(aligned_message)} bytes (removed {len(message) - len(aligned_message)} bytes)")
+                                    else:
+                                        print(f"🔵 Skipped small message: {len(message)} bytes (likely metadata)")
                                 
                             except Exception as parse_error:
                                 print(f"🔵 Error parsing binary message: {parse_error}")
-                                # Try to use the raw message as audio data
-                                if len(message) > 0:
-                                    audio_chunks.append(message)
-                                    print(f"🔵 Added raw audio chunk (parse error fallback): {len(message)} bytes")
+                                # Try to use the raw message as audio data if it's large enough and properly aligned
+                                if len(message) > 1000:
+                                    if len(message) % 2 == 0:
+                                        audio_chunks.append(message)
+                                        print(f"🔵 Added raw audio chunk (parse error fallback): {len(message)} bytes")
+                                    else:
+                                        aligned_message = message[:-1]
+                                        audio_chunks.append(aligned_message)
+                                        print(f"🔵 Added aligned audio chunk (parse error fallback): {len(aligned_message)} bytes")
                 
                 except asyncio.TimeoutError:
                     print("🔵 WebSocket timeout - ending collection")
@@ -304,8 +317,16 @@ class AzureStreamingTTS(TTS):
                 # Success! Reset failure counter
                 self._failed_requests = 0
                 
+                # Ensure audio data is properly aligned for 16-bit PCM
+                if len(audio_data) % 2 != 0:
+                    # Remove the last byte to make it even
+                    audio_data = audio_data[:-1]
+                    print(f"🔵 Aligned audio data: removed 1 byte, now {len(audio_data)} bytes")
+                
                 # Calculate samples per channel for 16-bit audio
                 samples_per_channel = len(audio_data) // (self._num_channels * 2)  # 2 bytes per sample (16-bit)
+                
+                print(f"🔵 Creating AudioFrame: {len(audio_data)} bytes, {samples_per_channel} samples per channel")
                 
                 audio_frame = rtc.AudioFrame(
                     data=audio_data,
