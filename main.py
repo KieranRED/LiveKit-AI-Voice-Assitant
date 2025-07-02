@@ -185,6 +185,7 @@ class AzureStreamingTTS(TTS):
         """Synthesize speech using faster WebSocket approach - returns async generator for LiveKit compatibility"""
         # Accept any additional kwargs that LiveKit might pass
         conn_options = kwargs.get('conn_options', None)
+        request_id = str(uuid.uuid4())
         
         try:
             start_time = time.time()
@@ -195,11 +196,29 @@ class AzureStreamingTTS(TTS):
             processing_time = time.time() - start_time
             print(f"🔵 Azure WebSocket TTS: Generated {len(audio_data)} bytes in {processing_time:.3f}s")
             
-            # FIXED: Remove 'text' parameter that was causing the error
+            # FIXED: Create AudioFrame first, then pass it to SynthesizedAudio
+            if len(audio_data) > 0:
+                # Calculate samples per channel for 16-bit audio
+                samples_per_channel = len(audio_data) // (self._num_channels * 2)  # 2 bytes per sample (16-bit)
+                
+                audio_frame = rtc.AudioFrame(
+                    data=audio_data,
+                    sample_rate=self._sample_rate,
+                    num_channels=self._num_channels,
+                    samples_per_channel=samples_per_channel
+                )
+            else:
+                # Create empty frame for error case
+                audio_frame = rtc.AudioFrame.create(
+                    sample_rate=self._sample_rate,
+                    num_channels=self._num_channels,
+                    samples_per_channel=0
+                )
+            
             synthesized_audio = SynthesizedAudio(
-                data=audio_data,
-                sample_rate=48000,
-                num_channels=1
+                frame=audio_frame,
+                request_id=request_id,
+                is_final=True
             )
             
             # LiveKit expects an async generator, so yield the result
@@ -207,11 +226,16 @@ class AzureStreamingTTS(TTS):
             
         except Exception as e:
             print(f"❌ Azure TTS Error: {e}")
-            # FIXED: Remove 'text' parameter from error case too
+            # Create empty AudioFrame for error case
+            empty_frame = rtc.AudioFrame.create(
+                sample_rate=self._sample_rate,
+                num_channels=self._num_channels,
+                samples_per_channel=0
+            )
             yield SynthesizedAudio(
-                data=b"",
-                sample_rate=48000,
-                num_channels=1
+                frame=empty_frame,
+                request_id=request_id,
+                is_final=True
             )
 
 
