@@ -142,14 +142,11 @@ class AzureStreamingTTS(TTS):
         access_token = await self._get_access_token()
         request_id = str(uuid.uuid4()).replace('-', '')
         
-        # WebSocket headers
-        headers = {
-            'Authorization': f'Bearer {access_token}',
-            'X-ConnectionId': str(uuid.uuid4())
-        }
-        
         try:
-            async with websockets.connect(self._ws_url, extra_headers=headers) as websocket:
+            # Connect to WebSocket without extra_headers (use subprotocol approach instead)
+            uri = f"{self._ws_url}?Authorization=Bearer%20{access_token}&X-ConnectionId={str(uuid.uuid4())}"
+            
+            async with websockets.connect(uri) as websocket:
                 # Send configuration
                 config_msg = self._create_config_message(request_id)
                 await websocket.send(config_msg)
@@ -184,8 +181,11 @@ class AzureStreamingTTS(TTS):
             print(f"❌ Azure WebSocket error: {e}")
             raise
     
-    async def synthesize(self, text: str, *, conn_options=None):
+    async def synthesize(self, text: str, **kwargs):
         """Synthesize speech using faster WebSocket approach - returns async generator for LiveKit compatibility"""
+        # Accept any additional kwargs that LiveKit might pass
+        conn_options = kwargs.get('conn_options', None)
+        
         try:
             start_time = time.time()
             
