@@ -224,13 +224,26 @@ class AzureStreamingTTS(TTS):
                                     print(f"🔵 Header: {header}")
                                     print(f"🔵 Audio data: {len(audio_data)} bytes")
                                     
-                                    # Check if this is audio data
+                                    # Check if this is audio data - Azure sends Path:audio
                                     if 'Path:audio' in header and len(audio_data) > 0:
                                         audio_chunks.append(audio_data)
                                         print(f"🔵 Added audio chunk: {len(audio_data)} bytes")
+                                    # Also check for binary audio without explicit Path:audio header
+                                    elif len(audio_data) > 0 and len(header.strip()) < 200:  # Small header = likely audio
+                                        audio_chunks.append(audio_data)
+                                        print(f"🔵 Added audio chunk (no explicit audio path): {len(audio_data)} bytes")
+                                else:
+                                    # No header found, might be raw audio data
+                                    if len(message) > 0:
+                                        audio_chunks.append(message)
+                                        print(f"🔵 Added raw audio chunk: {len(message)} bytes")
                                 
                             except Exception as parse_error:
                                 print(f"🔵 Error parsing binary message: {parse_error}")
+                                # Try to use the raw message as audio data
+                                if len(message) > 0:
+                                    audio_chunks.append(message)
+                                    print(f"🔵 Added raw audio chunk (parse error fallback): {len(message)} bytes")
                 
                 except asyncio.TimeoutError:
                     print("🔵 WebSocket timeout - ending collection")
