@@ -250,40 +250,76 @@ class AzureStreamingTTS(TTS):
                                 elif b'Path:audio' in message:
                                     print(f"🔵 Found Path:audio marker, trying to extract audio...")
                                     
-                                    # Try different possible separators
-                                    separators = [b'\r\n\r\n', b'\n\n', b'\r\r', b'\x00\x00']
-                                    found_separator = False
+                                    # Azure sends audio with headers like:
+                                    # X-RequestId:...
+                                    # Path:audio
+                                    # [separator]
+                                    # [PCM audio data]
                                     
-                                    for sep in separators:
-                                        sep_pos = message.find(sep)
-                                        if sep_pos != -1:
-                                            audio_data = message[sep_pos + len(sep):]
-                                            if len(audio_data) > 0:
-                                                print(f"🔵 Found separator {repr(sep)}, extracted: {len(audio_data)} bytes")
-                                                found_separator = True
-                                                break
-                                    
-                                    if not found_separator:
-                                        # No separator found - maybe the audio starts after a fixed header length
-                                        # Azure sometimes uses fixed-length headers
-                                        header_text = message[:200].decode('utf-8', errors='ignore')
-                                        print(f"🔵 No separator found, header preview: {header_text[:100]}...")
+                                    # Find the Path:audio marker position
+                                    path_audio_pos = message.find(b'Path:audio')
+                                    if path_audio_pos != -1:
+                                        # Look for audio data after the Path:audio marker
+                                        search_start = path_audio_pos + len(b'Path:audio')
+                                        remaining = message[search_start:]
                                         
-                                        # Try to find where binary data starts (after text ends)
-                                        try:
-                                            # Look for the end of readable text
-                                            for i in range(min(500, len(message))):
-                                                # If we hit non-printable bytes that aren't common in headers
-                                                if message[i] < 32 and message[i] not in [9, 10, 13]:  # Not tab, LF, CR
-                                                    audio_data = message[i:]
-                                                    print(f"🔵 Found binary start at position {i}, extracted: {len(audio_data)} bytes")
+                                        # Try different possible separators after Path:audio
+                                        separators = [b'\r\n\r\n', b'\n\n', b'\r\r', b'\x00\x00', b'\n', b'\r']
+                                        found_separator = False
+                                        
+                                        for sep in separators:
+                                            sep_pos = remaining.find(sep)
+                                            if sep_pos != -1:
+                                                # Found separator - audio starts after it
+                                                audio_start_in_remaining = sep_pos + len(sep)
+                                                audio_data = remaining[audio_start_in_remaining:]
+                                                
+                                                # Additional cleaning: remove any remaining header bytes
+                                                # Look for patterns that suggest we're still in headers
+                                                cleaned_audio = audio_data
+                                                
+                                                # Remove any leading text/header patterns
+                                                for i in range(min(100, len(audio_data))):
+                                                    byte_val = audio_data[i] if i < len(audio_data) else 0
+                                                    # Look for start of binary audio data
+                                                    # PCM audio usually has varied values, headers have patterns
+                                                    if i > 10:  # Give some buffer
+                                                        # Check if we've hit a section that looks like audio
+                                                        chunk = audio_data[max(0, i-10):i+10]
+                                                        if len(chunk) >= 20:
+                                                            # Calculate byte variety in this chunk
+                                                            unique_vals = len(set(chunk))
+                                                            if unique_vals > 8:  # Good variety suggests audio
+                                                                cleaned_audio = audio_data[i:]
+                                                                break
+                                                
+                                                if len(cleaned_audio) > 0:
+                                                    audio_data = cleaned_audio
+                                                    print(f"🔵 Found separator {repr(sep)}, extracted: {len(audio_data)} bytes")
+                                                    found_separator = True
                                                     break
-                                        except:
-                                            pass
                                         
-                                        if audio_data is None:
-                                            print(f"🔵 Could not find audio data in Path:audio message")
+                                        if not found_separator:
+                                            # Fallback: look for binary data start after Path:audio
+                                            print(f"🔵 No separator found, looking for binary start...")
+                                            
+                                            # Start searching after "Path:audio" for where binary data begins
+                                            for i in range(min(200, len(remaining))):
+                                                if i > 20:  # Skip some header space
+                                                    # Look for transition to binary data
+                                                    if remaining[i] < 32 and remaining[i] not in [9, 10, 13]:
+                                                        # Found likely binary start
+                                                        audio_data = remaining[i:]
+                                                        print(f"🔵 Found binary start at position {search_start + i}, extracted: {len(audio_data)} bytes")
+                                                        found_separator = True
+                                                        break
+                                        
+                                        if not found_separator:
+                                            print(f"🔵 Could not locate audio data in Path:audio message")
                                             continue
+                                    else:
+                                        print(f"🔵 Path:audio marker not found in expected location")
+                                        continue
                                 
                                 # Method 4: Check for WAV or other audio format headers
                                 elif message.startswith(b'RIFF') or message.startswith(b'WAV') or message.startswith(b'\xff\xfb'):
