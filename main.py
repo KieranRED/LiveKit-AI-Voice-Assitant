@@ -240,14 +240,14 @@ class AzureStreamingTTS(TTS):
                                         print(f"🔵 Skipped non-audio header message")
                                         continue
                                 
-                                # Method 2: Check for other common header patterns
-                                elif message.startswith(b'X-RequestId:') or b'Content-Type:' in message[:200]:
-                                    # This looks like a header message without \r\n\r\n separator
-                                    print(f"🔵 Detected header pattern, skipping message")
+                                # Method 2: Check if the message starts with actual HTTP headers
+                                elif message.startswith(b'X-RequestId:') or message.startswith(b'Content-Type:') or message.startswith(b'Path:'):
+                                    # This is definitely a header message - skip it
+                                    print(f"🔵 Detected HTTP header at start, skipping message")
                                     continue
                                 
-                                # Method 3: Check for Azure-specific audio markers
-                                elif b'Path:audio' in message[:100]:
+                                # Method 3: Check for Azure-specific audio markers in small portion
+                                elif b'Path:audio' in message[:200]:
                                     # Find where the actual audio data starts after the headers
                                     audio_start = message.find(b'\r\n\r\n')
                                     if audio_start != -1:
@@ -262,21 +262,11 @@ class AzureStreamingTTS(TTS):
                                     print(f"🔵 Detected audio format header, skipping")
                                     continue
                                 
-                                # Method 5: Analyze the binary pattern to detect if it's likely PCM
+                                # Method 5: Default - treat as raw PCM if it's large enough
                                 elif len(message) > 500:
-                                    # Check if this looks like raw PCM data by analyzing byte patterns
-                                    # PCM audio typically has more varied byte distribution
-                                    sample_bytes = message[:100]
-                                    unique_bytes = len(set(sample_bytes))
-                                    
-                                    # If there's good byte variety, it's likely audio
-                                    # If it's mostly the same bytes, it's likely padding/headers
-                                    if unique_bytes > 20:  # Good variety suggests PCM audio
-                                        audio_data = message
-                                        print(f"🔵 Treating as raw PCM (variety: {unique_bytes}): {len(audio_data)} bytes")
-                                    else:
-                                        print(f"🔵 Low byte variety ({unique_bytes}), skipping as non-audio")
-                                        continue
+                                    # Most likely raw PCM audio data from Azure
+                                    audio_data = message
+                                    print(f"🔵 Treating as raw PCM: {len(audio_data)} bytes")
                                 else:
                                     print(f"🔵 Skipped medium message: {len(message)} bytes")
                                     continue
