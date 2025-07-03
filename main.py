@@ -215,9 +215,6 @@ class AzureStreamingTTS(TTS):
                         elif isinstance(message, bytes):
                             print(f"🔵 Received binary message: {len(message)} bytes")
                             
-                            # Azure sends audio chunks that may have headers or be raw PCM
-                            # We need to extract only the PCM audio data
-                            
                             # Skip very small messages (control/metadata)
                             if len(message) < 100:
                                 print(f"🔵 Skipped tiny message: {len(message)} bytes (control)")
@@ -226,7 +223,7 @@ class AzureStreamingTTS(TTS):
                             audio_data = None
                             
                             try:
-                                # Check for HTTP-style headers ending with \r\n\r\n
+                                # Method 1: Check for HTTP-style headers ending with \r\n\r\n
                                 header_end = message.find(b'\r\n\r\n')
                                 if header_end != -1:
                                     # Has headers - extract just the audio part
@@ -242,37 +239,59 @@ class AzureStreamingTTS(TTS):
                                     else:
                                         print(f"🔵 Skipped non-audio header message")
                                         continue
-                                else:
-                                    # No standard headers found
-                                    # Azure sometimes sends audio with a small header prefix
-                                    # Check for common Azure TTS binary patterns
-                                    
-                                    # Look for potential WAV-like headers or Azure-specific markers
-                                    if message.startswith(b'RIFF') or message.startswith(b'WAV'):
-                                        print(f"🔵 Detected WAV header, skipping")
-                                        continue
-                                    
-                                    # Check if this looks like raw PCM (common pattern detection)
-                                    # Raw PCM typically has more varied byte patterns
-                                    if len(message) > 500:
-                                        # Assume it's raw PCM audio
-                                        audio_data = message
-                                        print(f"🔵 Treating as raw PCM: {len(audio_data)} bytes")
+                                
+                                # Method 2: Check for other common header patterns
+                                elif message.startswith(b'X-RequestId:') or b'Content-Type:' in message[:200]:
+                                    # This looks like a header message without \r\n\r\n separator
+                                    print(f"🔵 Detected header pattern, skipping message")
+                                    continue
+                                
+                                # Method 3: Check for Azure-specific audio markers
+                                elif b'Path:audio' in message[:100]:
+                                    # Find where the actual audio data starts after the headers
+                                    audio_start = message.find(b'\r\n\r\n')
+                                    if audio_start != -1:
+                                        audio_data = message[audio_start + 4:]
+                                        print(f"🔵 Found audio marker, extracted: {len(audio_data)} bytes")
                                     else:
-                                        print(f"🔵 Skipped small non-header message: {len(message)} bytes")
+                                        print(f"🔵 Audio marker found but no data separator")
                                         continue
                                 
-                                # Add the clean audio data
+                                # Method 4: Check for WAV or other audio format headers
+                                elif message.startswith(b'RIFF') or message.startswith(b'WAV') or message.startswith(b'\xff\xfb'):
+                                    print(f"🔵 Detected audio format header, skipping")
+                                    continue
+                                
+                                # Method 5: Analyze the binary pattern to detect if it's likely PCM
+                                elif len(message) > 500:
+                                    # Check if this looks like raw PCM data by analyzing byte patterns
+                                    # PCM audio typically has more varied byte distribution
+                                    sample_bytes = message[:100]
+                                    unique_bytes = len(set(sample_bytes))
+                                    
+                                    # If there's good byte variety, it's likely audio
+                                    # If it's mostly the same bytes, it's likely padding/headers
+                                    if unique_bytes > 20:  # Good variety suggests PCM audio
+                                        audio_data = message
+                                        print(f"🔵 Treating as raw PCM (variety: {unique_bytes}): {len(audio_data)} bytes")
+                                    else:
+                                        print(f"🔵 Low byte variety ({unique_bytes}), skipping as non-audio")
+                                        continue
+                                else:
+                                    print(f"🔵 Skipped medium message: {len(message)} bytes")
+                                    continue
+                                
+                                # Add the clean audio data if we found any
                                 if audio_data and len(audio_data) > 0:
                                     audio_chunks.append(audio_data)
                                     print(f"🔵 Added clean audio chunk: {len(audio_data)} bytes")
                                 
                             except Exception as parse_error:
                                 print(f"🔵 Error parsing binary message: {parse_error}")
-                                # Last resort for large messages
-                                if len(message) > 1000:
+                                # Conservative fallback for very large messages only
+                                if len(message) > 10000:
                                     audio_chunks.append(message)
-                                    print(f"🔵 Added fallback chunk: {len(message)} bytes")
+                                    print(f"🔵 Added large fallback chunk: {len(message)} bytes")
                 
                 except asyncio.TimeoutError:
                     print("🔵 WebSocket timeout - ending collection")
