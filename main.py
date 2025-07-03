@@ -164,8 +164,90 @@ class AzureStreamingTTS(TTS):
         
         return message
     
+    def _extract_audio_from_message(self, message: bytes) -> Optional[bytes]:
+        """Extract clean PCM audio data from Azure WebSocket message"""
+        try:
+            # Check if this is a Path:audio message
+            if b'Path:audio' not in message:
+                return None
+            
+            # Find the Path:audio marker
+            path_audio_pos = message.find(b'Path:audio')
+            if path_audio_pos == -1:
+                return None
+            
+            # Look for the end of headers (double CRLF is the HTTP standard)
+            header_patterns = [
+                b'\r\n\r\n',  # Standard HTTP header terminator
+                b'\n\n',      # Alternative
+                b'\r\r',      # Alternative
+            ]
+            
+            audio_start = None
+            for pattern in header_patterns:
+                pattern_pos = message.find(pattern, path_audio_pos)
+                if pattern_pos != -1:
+                    audio_start = pattern_pos + len(pattern)
+                    break
+            
+            if audio_start is None:
+                # Fallback: look for binary data pattern after Path:audio
+                search_start = path_audio_pos + len(b'Path:audio')
+                for i in range(search_start, min(search_start + 200, len(message))):
+                    # Look for sequence of bytes that look like PCM audio
+                    if i + 20 < len(message):
+                        chunk = message[i:i+20]
+                        # PCM audio has varied byte values, headers are more uniform
+                        unique_bytes = len(set(chunk))
+                        if unique_bytes > 10:  # Good variety suggests audio
+                            audio_start = i
+                            break
+            
+            if audio_start is None:
+                return None
+            
+            # Extract the audio data
+            audio_data = message[audio_start:]
+            
+            # Validate it's actually audio data (not more headers)
+            if len(audio_data) < 100:
+                return None
+            
+            # Check for remaining header contamination at the start
+            # Look for the first 100 bytes to see if they contain text
+            header_check = audio_data[:100]
+            try:
+                # If we can decode it as text, it's probably not pure audio
+                decoded = header_check.decode('utf-8', errors='ignore')
+                if len(decoded) > 50 and any(c.isalpha() for c in decoded):
+                    print(f"🔵 Detected header contamination, attempting to clean...")
+                    
+                    # Try to find where the actual audio starts
+                    for i in range(100, min(500, len(audio_data))):
+                        test_chunk = audio_data[i:i+50]
+                        try:
+                            test_decoded = test_chunk.decode('utf-8', errors='ignore')
+                            if len(test_decoded) < 10 or not any(c.isalpha() for c in test_decoded):
+                                # Found point where text stops
+                                audio_data = audio_data[i:]
+                                print(f"🔵 Cleaned header contamination, audio starts at byte {i}")
+                                break
+                        except:
+                            # Can't decode as text, probably audio
+                            audio_data = audio_data[i:]
+                            break
+            except:
+                # Can't decode as text, probably good audio
+                pass
+            
+            return audio_data
+            
+        except Exception as e:
+            print(f"🔵 Error extracting audio from message: {e}")
+            return None
+    
     async def _websocket_synthesis(self, text: str) -> bytes:
-        """Fast WebSocket synthesis using Azure Speech Services WebSocket API - FIXED VERSION"""
+        """Fixed WebSocket synthesis with proper audio extraction"""
         try:
             access_token = await self._get_access_token()
             request_id = str(uuid.uuid4()).replace('-', '')
@@ -191,7 +273,7 @@ class AzureStreamingTTS(TTS):
                 await websocket.send(ssml_msg)
                 print(f"🔵 Sent SSML message: {len(text)} chars")
                 
-                # Collect audio data with timeout
+                # Collect audio data with improved extraction
                 audio_chunks = []
                 received_turn_start = False
                 
@@ -217,147 +299,14 @@ class AzureStreamingTTS(TTS):
                             
                             # Skip very small messages (control/metadata)
                             if len(message) < 100:
-                                print(f"🔵 Skipped tiny message: {len(message)} bytes (control)")
                                 continue
                             
-                            audio_data = None
+                            # FIXED: More robust audio extraction
+                            audio_data = self._extract_audio_from_message(message)
                             
-                            try:
-                                # Method 1: Check for HTTP-style headers ending with \r\n\r\n
-                                header_end = message.find(b'\r\n\r\n')
-                                if header_end != -1:
-                                    # Has headers - extract just the audio part
-                                    header_part = message[:header_end].decode('utf-8', errors='ignore')
-                                    potential_audio = message[header_end + 4:]
-                                    
-                                    print(f"🔵 Found headers with separator: {header_part[:50]}...")
-                                    
-                                    # Only use if it's actually audio data
-                                    if 'Path:audio' in header_part and len(potential_audio) > 0:
-                                        audio_data = potential_audio
-                                        print(f"🔵 Extracted audio from headers: {len(audio_data)} bytes")
-                                    else:
-                                        print(f"🔵 Skipped non-audio header message")
-                                        continue
-                                
-                                # Method 2: Check if the message starts with actual HTTP headers
-                                elif message.startswith(b'X-RequestId:') or message.startswith(b'Content-Type:') or message.startswith(b'Path:'):
-                                    # This is definitely a header message - skip it
-                                    print(f"🔵 Detected HTTP header at start, skipping message")
-                                    continue
-                                
-                                # Method 3: Look for Path:audio marker and try different separators
-                                elif b'Path:audio' in message:
-                                    print(f"🔵 Found Path:audio marker, trying to extract audio...")
-                                    
-                                    # Azure sends audio with headers like:
-                                    # X-RequestId:...
-                                    # Path:audio
-                                    # [separator]
-                                    # [PCM audio data]
-                                    
-                                    # Find the Path:audio marker position
-                                    path_audio_pos = message.find(b'Path:audio')
-                                    if path_audio_pos != -1:
-                                        # Look for audio data after the Path:audio marker
-                                        search_start = path_audio_pos + len(b'Path:audio')
-                                        remaining = message[search_start:]
-                                        
-                                        # Try different possible separators after Path:audio
-                                        separators = [b'\r\n\r\n', b'\n\n', b'\r\r', b'\x00\x00', b'\n', b'\r']
-                                        found_separator = False
-                                        
-                                        for sep in separators:
-                                            sep_pos = remaining.find(sep)
-                                            if sep_pos != -1:
-                                                # Found separator - audio starts after it
-                                                audio_start_in_remaining = sep_pos + len(sep)
-                                                audio_data = remaining[audio_start_in_remaining:]
-                                                
-                                                # Additional cleaning: remove any remaining header bytes
-                                                # Look for patterns that suggest we're still in headers
-                                                cleaned_audio = audio_data
-                                                
-                                                # Remove any leading text/header patterns
-                                                for i in range(min(100, len(audio_data))):
-                                                    byte_val = audio_data[i] if i < len(audio_data) else 0
-                                                    # Look for start of binary audio data
-                                                    # PCM audio usually has varied values, headers have patterns
-                                                    if i > 10:  # Give some buffer
-                                                        # Check if we've hit a section that looks like audio
-                                                        chunk = audio_data[max(0, i-10):i+10]
-                                                        if len(chunk) >= 20:
-                                                            # Calculate byte variety in this chunk
-                                                            unique_vals = len(set(chunk))
-                                                            if unique_vals > 8:  # Good variety suggests audio
-                                                                cleaned_audio = audio_data[i:]
-                                                                break
-                                                
-                                                if len(cleaned_audio) > 0:
-                                                    audio_data = cleaned_audio
-                                                    print(f"🔵 Found separator {repr(sep)}, extracted: {len(audio_data)} bytes")
-                                                    found_separator = True
-                                                    break
-                                        
-                                        # Additional validation: reject tiny audio chunks that are likely noise
-                                        if found_separator and audio_data is not None:
-                                            if len(audio_data) < 100:  # Less than 100 bytes is likely not valid audio
-                                                print(f"🔵 Rejecting tiny audio chunk: {len(audio_data)} bytes (likely noise)")
-                                                audio_data = None
-                                                found_separator = False
-                                        
-                                        if not found_separator:
-                                            # Fallback: look for binary data start after Path:audio
-                                            print(f"🔵 No separator found, looking for binary start...")
-                                            
-                                            # Start searching after "Path:audio" for where binary data begins
-                                            for i in range(min(200, len(remaining))):
-                                                if i > 20:  # Skip some header space
-                                                    # Look for transition to binary data
-                                                    if remaining[i] < 32 and remaining[i] not in [9, 10, 13]:
-                                                        # Found likely binary start
-                                                        potential_audio = remaining[i:]
-                                                        if len(potential_audio) >= 100:  # Must be at least 100 bytes
-                                                            audio_data = potential_audio
-                                                            print(f"🔵 Found binary start at position {search_start + i}, extracted: {len(audio_data)} bytes")
-                                                            found_separator = True
-                                                            break
-                                        
-                                        if not found_separator:
-                                            print(f"🔵 Could not locate valid audio data in Path:audio message")
-                                            continue
-                                    else:
-                                        print(f"🔵 Path:audio marker not found in expected location")
-                                        continue
-                                
-                                # Method 4: Check for WAV or other audio format headers
-                                elif message.startswith(b'RIFF') or message.startswith(b'WAV') or message.startswith(b'\xff\xfb'):
-                                    print(f"🔵 Detected audio format header, skipping")
-                                    continue
-                                
-                                # Method 5: Default - treat as raw PCM if it's large enough
-                                else:
-                                    if len(message) > 500:
-                                        # Most likely raw PCM audio data from Azure
-                                        audio_data = message
-                                        print(f"🔵 Treating as raw PCM: {len(audio_data)} bytes")
-                                    else:
-                                        print(f"🔵 Skipped medium message: {len(message)} bytes")
-                                        continue
-                                
-                                # Add the clean audio data if we found any
-                                if audio_data and len(audio_data) >= 100:  # Only add chunks that are at least 100 bytes
-                                    audio_chunks.append(audio_data)
-                                    print(f"🔵 Added clean audio chunk: {len(audio_data)} bytes")
-                                elif audio_data:
-                                    print(f"🔵 Rejected small audio chunk: {len(audio_data)} bytes (likely header remnant)")
-                                
-                            except Exception as parse_error:
-                                print(f"🔵 Error parsing binary message: {parse_error}")
-                                # Conservative fallback for very large messages only
-                                if len(message) > 10000:
-                                    audio_chunks.append(message)
-                                    print(f"🔵 Added large fallback chunk: {len(message)} bytes")
+                            if audio_data and len(audio_data) >= 100:
+                                audio_chunks.append(audio_data)
+                                print(f"🔵 Added clean audio chunk: {len(audio_data)} bytes")
                 
                 except asyncio.TimeoutError:
                     print("🔵 WebSocket timeout - ending collection")
@@ -366,10 +315,26 @@ class AzureStreamingTTS(TTS):
                 total_audio = b"".join(audio_chunks)
                 print(f"🔵 Total audio collected: {len(total_audio)} bytes from {len(audio_chunks)} chunks")
                 
-                # CRITICAL: Ensure proper 16-bit PCM alignment
+                # Validate we got meaningful audio data
+                if len(total_audio) < 1000:
+                    print(f"⚠️ Audio data too small: {len(total_audio)} bytes, may be corrupted")
+                    # If we got almost nothing, throw an error to trigger fallback
+                    if len(total_audio) < 100:
+                        raise Exception("Azure returned insufficient audio data")
+                
+                # Ensure proper 16-bit PCM alignment
                 if len(total_audio) % 2 != 0:
                     total_audio = total_audio[:-1]
                     print(f"🔵 Aligned final audio: removed 1 byte, now {len(total_audio)} bytes")
+                
+                # Additional validation: check for reasonable audio characteristics
+                if len(total_audio) >= 1000:
+                    # Sample first 1000 bytes to check variety (audio should have good variety)
+                    sample = total_audio[:1000]
+                    unique_bytes = len(set(sample))
+                    if unique_bytes < 50:  # Too uniform, might be corrupted
+                        print(f"⚠️ Audio may be corrupted - low byte variety: {unique_bytes}/256")
+                        # Don't throw error here, just warn - some audio might be naturally uniform
                 
                 return total_audio
                 
