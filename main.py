@@ -215,38 +215,41 @@ class AzureStreamingTTS(TTS):
                         elif isinstance(message, bytes):
                             print(f"🔵 Received binary message: {len(message)} bytes")
                             
-                            # Azure WebSocket sends audio with specific format:
-                            # Headers followed by PCM audio data separated by \r\n\r\n
+                            # Azure WebSocket sends audio in different formats:
+                            # 1. With headers: Headers\r\n\r\nPCM_DATA
+                            # 2. Raw PCM data without headers
+                            
+                            # Skip very small messages (likely control/metadata)
+                            if len(message) < 500:
+                                print(f"🔵 Skipped small message: {len(message)} bytes (metadata)")
+                                continue
+                            
                             try:
-                                # Look for header separator
+                                # Check if this message has headers
                                 header_end = message.find(b'\r\n\r\n')
                                 if header_end != -1:
-                                    # Parse headers and extract audio
+                                    # Message has headers - extract them
                                     header_part = message[:header_end].decode('utf-8', errors='ignore')
                                     audio_data = message[header_end + 4:]  # Skip \r\n\r\n
                                     
                                     print(f"🔵 Header: {header_part[:50]}...")
                                     
-                                    # Only process messages with Path:audio header
+                                    # Check if this is audio data
                                     if 'Path:audio' in header_part and len(audio_data) > 0:
-                                        # Azure sends clean PCM data - don't modify it!
                                         audio_chunks.append(audio_data)
-                                        print(f"🔵 Added audio chunk: {len(audio_data)} bytes")
+                                        print(f"🔵 Added audio chunk (with header): {len(audio_data)} bytes")
                                     else:
-                                        print(f"🔵 Skipped non-audio message")
+                                        print(f"🔵 Skipped non-audio header message")
                                 else:
-                                    # No headers - this might be raw audio or metadata
-                                    if len(message) > 1000:  # Likely audio
-                                        # Azure WebSocket sometimes sends raw PCM without headers
-                                        audio_chunks.append(message)
-                                        print(f"🔵 Added raw audio chunk: {len(message)} bytes")
-                                    else:
-                                        print(f"🔵 Skipped small message: {len(message)} bytes (metadata)")
+                                    # No headers found - treat as raw PCM audio data
+                                    # This is the most common case for Azure WebSocket TTS
+                                    audio_chunks.append(message)
+                                    print(f"🔵 Added raw audio chunk: {len(message)} bytes")
                             
                             except Exception as parse_error:
                                 print(f"🔵 Error parsing binary message: {parse_error}")
-                                # As last resort, if it's large enough, treat as audio
-                                if len(message) >= 1000:
+                                # Fallback: if it's large enough, treat as raw audio
+                                if len(message) >= 500:
                                     audio_chunks.append(message)
                                     print(f"🔵 Added fallback audio chunk: {len(message)} bytes")
                 
