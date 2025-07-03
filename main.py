@@ -215,43 +215,64 @@ class AzureStreamingTTS(TTS):
                         elif isinstance(message, bytes):
                             print(f"🔵 Received binary message: {len(message)} bytes")
                             
-                            # Azure WebSocket sends audio in different formats:
-                            # 1. With headers: Headers\r\n\r\nPCM_DATA
-                            # 2. Raw PCM data without headers
+                            # Azure sends audio chunks that may have headers or be raw PCM
+                            # We need to extract only the PCM audio data
                             
-                            # Skip very small messages (likely control/metadata)
-                            if len(message) < 500:
-                                print(f"🔵 Skipped small message: {len(message)} bytes (metadata)")
+                            # Skip very small messages (control/metadata)
+                            if len(message) < 100:
+                                print(f"🔵 Skipped tiny message: {len(message)} bytes (control)")
                                 continue
                             
+                            audio_data = None
+                            
                             try:
-                                # Check if this message has headers
+                                # Check for HTTP-style headers ending with \r\n\r\n
                                 header_end = message.find(b'\r\n\r\n')
                                 if header_end != -1:
-                                    # Message has headers - extract them
+                                    # Has headers - extract just the audio part
                                     header_part = message[:header_end].decode('utf-8', errors='ignore')
-                                    audio_data = message[header_end + 4:]  # Skip \r\n\r\n
+                                    potential_audio = message[header_end + 4:]
                                     
-                                    print(f"🔵 Header: {header_part[:50]}...")
+                                    print(f"🔵 Found headers: {header_part[:50]}...")
                                     
-                                    # Check if this is audio data
-                                    if 'Path:audio' in header_part and len(audio_data) > 0:
-                                        audio_chunks.append(audio_data)
-                                        print(f"🔵 Added audio chunk (with header): {len(audio_data)} bytes")
+                                    # Only use if it's actually audio data
+                                    if 'Path:audio' in header_part and len(potential_audio) > 0:
+                                        audio_data = potential_audio
+                                        print(f"🔵 Extracted audio from headers: {len(audio_data)} bytes")
                                     else:
                                         print(f"🔵 Skipped non-audio header message")
+                                        continue
                                 else:
-                                    # No headers found - treat as raw PCM audio data
-                                    # This is the most common case for Azure WebSocket TTS
-                                    audio_chunks.append(message)
-                                    print(f"🔵 Added raw audio chunk: {len(message)} bytes")
-                            
+                                    # No standard headers found
+                                    # Azure sometimes sends audio with a small header prefix
+                                    # Check for common Azure TTS binary patterns
+                                    
+                                    # Look for potential WAV-like headers or Azure-specific markers
+                                    if message.startswith(b'RIFF') or message.startswith(b'WAV'):
+                                        print(f"🔵 Detected WAV header, skipping")
+                                        continue
+                                    
+                                    # Check if this looks like raw PCM (common pattern detection)
+                                    # Raw PCM typically has more varied byte patterns
+                                    if len(message) > 500:
+                                        # Assume it's raw PCM audio
+                                        audio_data = message
+                                        print(f"🔵 Treating as raw PCM: {len(audio_data)} bytes")
+                                    else:
+                                        print(f"🔵 Skipped small non-header message: {len(message)} bytes")
+                                        continue
+                                
+                                # Add the clean audio data
+                                if audio_data and len(audio_data) > 0:
+                                    audio_chunks.append(audio_data)
+                                    print(f"🔵 Added clean audio chunk: {len(audio_data)} bytes")
+                                
                             except Exception as parse_error:
                                 print(f"🔵 Error parsing binary message: {parse_error}")
-                                # Fallback: if it's large enough, treat as raw audio
-                                if len(message) >= 500:
+                                # Last resort for large messages
+                                if len(message) > 1000:
                                     audio_chunks.append(message)
-                                    print(f"🔵 Added fallback audio chunk: {len(message)} bytes")
+                                    print(f"🔵 Added fallback chunk: {len(message)} bytes")
                 
                 except asyncio.TimeoutError:
                     print("🔵 WebSocket timeout - ending collection")
@@ -260,12 +281,10 @@ class AzureStreamingTTS(TTS):
                 total_audio = b"".join(audio_chunks)
                 print(f"🔵 Total audio collected: {len(total_audio)} bytes from {len(audio_chunks)} chunks")
                 
-                # CRITICAL FIX: Ensure the audio data is properly aligned for 16-bit PCM
-                # Azure sends PCM data, but we need to ensure it's properly aligned
+                # CRITICAL: Ensure proper 16-bit PCM alignment
                 if len(total_audio) % 2 != 0:
-                    # If odd number of bytes, remove the last byte to align to 16-bit samples
                     total_audio = total_audio[:-1]
-                    print(f"🔵 Aligned audio data: removed 1 byte, now {len(total_audio)} bytes")
+                    print(f"🔵 Aligned final audio: removed 1 byte, now {len(total_audio)} bytes")
                 
                 return total_audio
                 
