@@ -299,6 +299,13 @@ class AzureStreamingTTS(TTS):
                                                     found_separator = True
                                                     break
                                         
+                                        # Additional validation: reject tiny audio chunks that are likely noise
+                                        if found_separator and audio_data is not None:
+                                            if len(audio_data) < 100:  # Less than 100 bytes is likely not valid audio
+                                                print(f"🔵 Rejecting tiny audio chunk: {len(audio_data)} bytes (likely noise)")
+                                                audio_data = None
+                                                found_separator = False
+                                        
                                         if not found_separator:
                                             # Fallback: look for binary data start after Path:audio
                                             print(f"🔵 No separator found, looking for binary start...")
@@ -309,13 +316,15 @@ class AzureStreamingTTS(TTS):
                                                     # Look for transition to binary data
                                                     if remaining[i] < 32 and remaining[i] not in [9, 10, 13]:
                                                         # Found likely binary start
-                                                        audio_data = remaining[i:]
-                                                        print(f"🔵 Found binary start at position {search_start + i}, extracted: {len(audio_data)} bytes")
-                                                        found_separator = True
-                                                        break
+                                                        potential_audio = remaining[i:]
+                                                        if len(potential_audio) >= 100:  # Must be at least 100 bytes
+                                                            audio_data = potential_audio
+                                                            print(f"🔵 Found binary start at position {search_start + i}, extracted: {len(audio_data)} bytes")
+                                                            found_separator = True
+                                                            break
                                         
                                         if not found_separator:
-                                            print(f"🔵 Could not locate audio data in Path:audio message")
+                                            print(f"🔵 Could not locate valid audio data in Path:audio message")
                                             continue
                                     else:
                                         print(f"🔵 Path:audio marker not found in expected location")
@@ -337,9 +346,11 @@ class AzureStreamingTTS(TTS):
                                         continue
                                 
                                 # Add the clean audio data if we found any
-                                if audio_data and len(audio_data) > 0:
+                                if audio_data and len(audio_data) >= 100:  # Only add chunks that are at least 100 bytes
                                     audio_chunks.append(audio_data)
                                     print(f"🔵 Added clean audio chunk: {len(audio_data)} bytes")
+                                elif audio_data:
+                                    print(f"🔵 Rejected small audio chunk: {len(audio_data)} bytes (likely header remnant)")
                                 
                             except Exception as parse_error:
                                 print(f"🔵 Error parsing binary message: {parse_error}")
