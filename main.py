@@ -165,82 +165,143 @@ class AzureStreamingTTS(TTS):
         return message
     
     def _extract_audio_from_message(self, message: bytes) -> Optional[bytes]:
-        """Extract clean PCM audio data from Azure WebSocket message"""
+        """Extract clean PCM audio data from Azure WebSocket message - AGGRESSIVE CLEANING"""
         try:
             # Check if this is a Path:audio message
             if b'Path:audio' not in message:
                 return None
             
-            # Find the Path:audio marker
+            # Method 1: Look for WAV header patterns that Azure sometimes sends
+            wav_header_pos = message.find(b'RIFF')
+            if wav_header_pos != -1:
+                # This is a WAV file - extract the audio data after the header
+                wav_data = message[wav_header_pos:]
+                if len(wav_data) > 44:  # WAV header is 44 bytes
+                    # Skip WAV header and return raw PCM data
+                    return wav_data[44:]
+            
+            # Method 2: Look for binary PCM data patterns
+            # Azure sends raw PCM data, which should have good byte variety
+            # and no readable text patterns
+            
+            # Start search after Path:audio
             path_audio_pos = message.find(b'Path:audio')
-            if path_audio_pos == -1:
-                return None
+            search_start = path_audio_pos + len(b'Path:audio')
             
-            # Look for the end of headers (double CRLF is the HTTP standard)
-            header_patterns = [
-                b'\r\n\r\n',  # Standard HTTP header terminator
-                b'\n\n',      # Alternative
-                b'\r\r',      # Alternative
-            ]
+            # Look for the largest contiguous block of binary data
+            best_audio_start = None
+            best_audio_size = 0
             
-            audio_start = None
-            for pattern in header_patterns:
-                pattern_pos = message.find(pattern, path_audio_pos)
-                if pattern_pos != -1:
-                    audio_start = pattern_pos + len(pattern)
-                    break
-            
-            if audio_start is None:
-                # Fallback: look for binary data pattern after Path:audio
-                search_start = path_audio_pos + len(b'Path:audio')
-                for i in range(search_start, min(search_start + 200, len(message))):
-                    # Look for sequence of bytes that look like PCM audio
-                    if i + 20 < len(message):
-                        chunk = message[i:i+20]
-                        # PCM audio has varied byte values, headers are more uniform
-                        unique_bytes = len(set(chunk))
-                        if unique_bytes > 10:  # Good variety suggests audio
-                            audio_start = i
-                            break
-            
-            if audio_start is None:
-                return None
-            
-            # Extract the audio data
-            audio_data = message[audio_start:]
-            
-            # Validate it's actually audio data (not more headers)
-            if len(audio_data) < 100:
-                return None
-            
-            # Check for remaining header contamination at the start
-            # Look for the first 100 bytes to see if they contain text
-            header_check = audio_data[:100]
-            try:
-                # If we can decode it as text, it's probably not pure audio
-                decoded = header_check.decode('utf-8', errors='ignore')
-                if len(decoded) > 50 and any(c.isalpha() for c in decoded):
-                    print(f"🔵 Detected header contamination, attempting to clean...")
+            # Scan through the message looking for binary data blocks
+            for start_pos in range(search_start, len(message) - 1000, 50):
+                # Test if this looks like PCM audio data
+                test_chunk = message[start_pos:start_pos + 1000]
+                
+                # Skip if it contains too much readable text
+                try:
+                    decoded = test_chunk.decode('utf-8', errors='ignore')
+                    readable_chars = sum(1 for c in decoded if c.isalnum() or c.isspace())
+                    if readable_chars > len(decoded) * 0.3:  # More than 30% readable = probably headers
+                        continue
+                except:
+                    pass
+                
+                # Check for good byte variety (PCM audio should have variety)
+                unique_bytes = len(set(test_chunk))
+                if unique_bytes < 100:  # Not enough variety for good audio
+                    continue
+                
+                # Check for patterns that suggest this is audio data
+                # PCM audio typically has values distributed across the range
+                byte_values = list(test_chunk)
+                if len(byte_values) > 0:
+                    # Calculate some basic statistics
+                    avg_val = sum(byte_values) / len(byte_values)
+                    # Good PCM audio should have average around 128 (middle of 0-255 range)
+                    if abs(avg_val - 128) > 50:
+                        continue
+                
+                # This looks like good audio data - find where it ends
+                audio_end = start_pos + 1000
+                for end_pos in range(start_pos + 1000, len(message), 1000):
+                    test_end_chunk = message[end_pos:end_pos + 100]
+                    if len(test_end_chunk) < 100:
+                        audio_end = end_pos
+                        break
                     
-                    # Try to find where the actual audio starts
-                    for i in range(100, min(500, len(audio_data))):
-                        test_chunk = audio_data[i:i+50]
-                        try:
-                            test_decoded = test_chunk.decode('utf-8', errors='ignore')
-                            if len(test_decoded) < 10 or not any(c.isalpha() for c in test_decoded):
-                                # Found point where text stops
-                                audio_data = audio_data[i:]
-                                print(f"🔵 Cleaned header contamination, audio starts at byte {i}")
-                                break
-                        except:
-                            # Can't decode as text, probably audio
-                            audio_data = audio_data[i:]
-                            break
-            except:
-                # Can't decode as text, probably good audio
-                pass
+                    # Check if this chunk still looks like audio
+                    end_unique_bytes = len(set(test_end_chunk))
+                    if end_unique_bytes < 30:  # Lost variety, probably end of audio
+                        audio_end = end_pos
+                        break
+                    
+                    audio_end = end_pos + 100
+                
+                # Track the best (largest) audio block found
+                audio_size = audio_end - start_pos
+                if audio_size > best_audio_size:
+                    best_audio_start = start_pos
+                    best_audio_size = audio_size
             
-            return audio_data
+            # If we found a good audio block, extract it
+            if best_audio_start is not None and best_audio_size > 1000:
+                audio_data = message[best_audio_start:best_audio_start + best_audio_size]
+                
+                # Final cleanup: remove any remaining header bytes at the start
+                # Look for the first sequence that looks like pure PCM
+                for i in range(0, min(200, len(audio_data)), 10):
+                    chunk = audio_data[i:i+100]
+                    if len(chunk) >= 100:
+                        # Check if this looks like clean PCM audio
+                        unique_vals = len(set(chunk))
+                        if unique_vals >= 50:  # Good variety
+                            # Check for text contamination
+                            try:
+                                decoded = chunk.decode('utf-8', errors='ignore')
+                                text_chars = sum(1 for c in decoded if c.isalnum())
+                                if text_chars < len(decoded) * 0.1:  # Less than 10% text
+                                    # This looks like clean audio
+                                    clean_audio = audio_data[i:]
+                                    if len(clean_audio) > 1000:
+                                        return clean_audio
+                            except:
+                                # Can't decode as text, probably good audio
+                                clean_audio = audio_data[i:]
+                                if len(clean_audio) > 1000:
+                                    return clean_audio
+                
+                # If no clean start found, return the best block we found
+                if len(audio_data) > 1000:
+                    return audio_data
+            
+            # Method 3: Fallback - look for standard header separators
+            header_patterns = [b'\r\n\r\n', b'\n\n', b'\r\r', b'\x00\x00']
+            
+            for pattern in header_patterns:
+                pattern_pos = message.find(pattern, search_start)
+                if pattern_pos != -1:
+                    potential_audio = message[pattern_pos + len(pattern):]
+                    if len(potential_audio) > 1000:
+                        # Apply the same cleaning logic
+                        for i in range(0, min(200, len(potential_audio)), 10):
+                            chunk = potential_audio[i:i+100]
+                            if len(chunk) >= 100:
+                                unique_vals = len(set(chunk))
+                                if unique_vals >= 50:
+                                    try:
+                                        decoded = chunk.decode('utf-8', errors='ignore')
+                                        text_chars = sum(1 for c in decoded if c.isalnum())
+                                        if text_chars < len(decoded) * 0.1:
+                                            clean_audio = potential_audio[i:]
+                                            if len(clean_audio) > 1000:
+                                                return clean_audio
+                                    except:
+                                        clean_audio = potential_audio[i:]
+                                        if len(clean_audio) > 1000:
+                                            return clean_audio
+            
+            # If nothing worked, return None
+            return None
             
         except Exception as e:
             print(f"🔵 Error extracting audio from message: {e}")
