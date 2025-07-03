@@ -165,7 +165,7 @@ class AzureStreamingTTS(TTS):
         return message
     
     async def _websocket_synthesis(self, text: str) -> bytes:
-        """Fast WebSocket synthesis using Azure Speech Services WebSocket API"""
+        """Fast WebSocket synthesis using Azure Speech Services WebSocket API - FIXED VERSION"""
         try:
             access_token = await self._get_access_token()
             request_id = str(uuid.uuid4()).replace('-', '')
@@ -208,77 +208,61 @@ class AzureStreamingTTS(TTS):
                                 print("🔵 Turn started")
                             elif 'Path:turn.end' in message:
                                 print("🔵 Turn ended")
-                                break  # This break is inside the while loop
+                                break
                             elif 'Path:response' in message:
                                 print("🔵 Response message received")
                         
                         elif isinstance(message, bytes):
                             print(f"🔵 Received binary message: {len(message)} bytes")
-                            # Azure TTS WebSocket sends audio in a specific format:
-                            # Binary messages contain headers followed by actual PCM audio data
+                            
+                            # Azure WebSocket sends audio with specific format:
+                            # Headers followed by PCM audio data separated by \r\n\r\n
                             try:
-                                # Look for the standard HTTP-like header ending
+                                # Look for header separator
                                 header_end = message.find(b'\r\n\r\n')
                                 if header_end != -1:
-                                    # We found headers - extract them and the audio data
-                                    header = message[:header_end].decode('utf-8', errors='ignore')
-                                    audio_data = message[header_end + 4:]  # Skip the \r\n\r\n
+                                    # Parse headers and extract audio
+                                    header_part = message[:header_end].decode('utf-8', errors='ignore')
+                                    audio_data = message[header_end + 4:]  # Skip \r\n\r\n
                                     
-                                    print(f"🔵 Header found: {header[:100]}...")  # Truncate long headers
-                                    print(f"🔵 Raw audio data after header: {len(audio_data)} bytes")
+                                    print(f"🔵 Header: {header_part[:50]}...")
                                     
-                                    # Only add if this contains actual audio content
-                                    # Azure typically sends Path:audio in the header for audio chunks
-                                    if 'Path:audio' in header and len(audio_data) > 0:
-                                        # Ensure the audio data is properly aligned for 16-bit PCM
-                                        if len(audio_data) % 2 != 0:
-                                            audio_data = audio_data[:-1]  # Remove last byte to align
-                                            print(f"🔵 Aligned audio data: {len(audio_data)} bytes")
-                                        
+                                    # Only process messages with Path:audio header
+                                    if 'Path:audio' in header_part and len(audio_data) > 0:
+                                        # Azure sends clean PCM data - don't modify it!
                                         audio_chunks.append(audio_data)
-                                        print(f"🔵 Added clean audio chunk: {len(audio_data)} bytes")
+                                        print(f"🔵 Added audio chunk: {len(audio_data)} bytes")
                                     else:
-                                        print(f"🔵 Skipped non-audio message with header")
-                                        
+                                        print(f"🔵 Skipped non-audio message")
                                 else:
-                                    # No header found - Azure sends audio as raw binary chunks
-                                    # Skip very small messages (likely metadata/control)
-                                    if len(message) < 1000:
-                                        print(f"🔵 Skipped small message: {len(message)} bytes (likely metadata)")
+                                    # No headers - this might be raw audio or metadata
+                                    if len(message) > 1000:  # Likely audio
+                                        # Azure WebSocket sometimes sends raw PCM without headers
+                                        audio_chunks.append(message)
+                                        print(f"🔵 Added raw audio chunk: {len(message)} bytes")
                                     else:
-                                        # This is likely a raw audio chunk - don't modify it!
-                                        # Azure sends properly formatted PCM data
-                                        print(f"🔵 Raw audio chunk detected: {len(message)} bytes")
-                                        
-                                        # Only align if actually needed (which it probably isn't)
-                                        if len(message) % 2 == 0:
-                                            # Already properly aligned - use as-is
-                                            audio_chunks.append(message)
-                                            print(f"🔵 Added raw audio chunk (already aligned): {len(message)} bytes")
-                                        else:
-                                            # Odd size - align it
-                                            aligned_message = message[:-1]
-                                            audio_chunks.append(aligned_message)
-                                            print(f"🔵 Added aligned audio chunk: {len(aligned_message)} bytes (removed 1 byte)")
-                                
+                                        print(f"🔵 Skipped small message: {len(message)} bytes (metadata)")
+                            
                             except Exception as parse_error:
                                 print(f"🔵 Error parsing binary message: {parse_error}")
-                                # Last resort - if it's large enough, treat as raw audio
+                                # As last resort, if it's large enough, treat as audio
                                 if len(message) >= 1000:
-                                    if len(message) % 2 == 0:
-                                        audio_chunks.append(message)
-                                        print(f"🔵 Added fallback audio chunk: {len(message)} bytes")
-                                    else:
-                                        aligned_message = message[:-1]
-                                        audio_chunks.append(aligned_message)
-                                        print(f"🔵 Added aligned fallback chunk: {len(aligned_message)} bytes")
+                                    audio_chunks.append(message)
+                                    print(f"🔵 Added fallback audio chunk: {len(message)} bytes")
                 
                 except asyncio.TimeoutError:
                     print("🔵 WebSocket timeout - ending collection")
-                    # No break needed here since we're exiting the try block
                 
+                # Combine all audio chunks
                 total_audio = b"".join(audio_chunks)
                 print(f"🔵 Total audio collected: {len(total_audio)} bytes from {len(audio_chunks)} chunks")
+                
+                # CRITICAL FIX: Ensure the audio data is properly aligned for 16-bit PCM
+                # Azure sends PCM data, but we need to ensure it's properly aligned
+                if len(total_audio) % 2 != 0:
+                    # If odd number of bytes, remove the last byte to align to 16-bit samples
+                    total_audio = total_audio[:-1]
+                    print(f"🔵 Aligned audio data: removed 1 byte, now {len(total_audio)} bytes")
                 
                 return total_audio
                 
@@ -331,13 +315,6 @@ class AzureStreamingTTS(TTS):
             else:
                 # Success! Reset failure counter
                 self._failed_requests = 0
-                
-                # Only align the FINAL combined audio data if needed for LiveKit
-                total_bytes = len(audio_data)
-                if total_bytes % 2 != 0:
-                    # Remove the last byte from the final combined data to make it even
-                    audio_data = audio_data[:-1]
-                    print(f"🔵 Final alignment: removed 1 byte from total, now {len(audio_data)} bytes")
                 
                 # Calculate samples per channel for 16-bit audio
                 samples_per_channel = len(audio_data) // (self._num_channels * 2)  # 2 bytes per sample (16-bit)
