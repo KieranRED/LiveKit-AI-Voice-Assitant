@@ -230,7 +230,7 @@ class AzureStreamingTTS(TTS):
                                     header_part = message[:header_end].decode('utf-8', errors='ignore')
                                     potential_audio = message[header_end + 4:]
                                     
-                                    print(f"🔵 Found headers: {header_part[:50]}...")
+                                    print(f"🔵 Found headers with separator: {header_part[:50]}...")
                                     
                                     # Only use if it's actually audio data
                                     if 'Path:audio' in header_part and len(potential_audio) > 0:
@@ -246,16 +246,44 @@ class AzureStreamingTTS(TTS):
                                     print(f"🔵 Detected HTTP header at start, skipping message")
                                     continue
                                 
-                                # Method 3: Check for Azure-specific audio markers in small portion
-                                elif b'Path:audio' in message[:200]:
-                                    # Find where the actual audio data starts after the headers
-                                    audio_start = message.find(b'\r\n\r\n')
-                                    if audio_start != -1:
-                                        audio_data = message[audio_start + 4:]
-                                        print(f"🔵 Found audio marker, extracted: {len(audio_data)} bytes")
-                                    else:
-                                        print(f"🔵 Audio marker found but no data separator")
-                                        continue
+                                # Method 3: Look for Path:audio marker and try different separators
+                                elif b'Path:audio' in message:
+                                    print(f"🔵 Found Path:audio marker, trying to extract audio...")
+                                    
+                                    # Try different possible separators
+                                    separators = [b'\r\n\r\n', b'\n\n', b'\r\r', b'\x00\x00']
+                                    found_separator = False
+                                    
+                                    for sep in separators:
+                                        sep_pos = message.find(sep)
+                                        if sep_pos != -1:
+                                            audio_data = message[sep_pos + len(sep):]
+                                            if len(audio_data) > 0:
+                                                print(f"🔵 Found separator {repr(sep)}, extracted: {len(audio_data)} bytes")
+                                                found_separator = True
+                                                break
+                                    
+                                    if not found_separator:
+                                        # No separator found - maybe the audio starts after a fixed header length
+                                        # Azure sometimes uses fixed-length headers
+                                        header_text = message[:200].decode('utf-8', errors='ignore')
+                                        print(f"🔵 No separator found, header preview: {header_text[:100]}...")
+                                        
+                                        # Try to find where binary data starts (after text ends)
+                                        try:
+                                            # Look for the end of readable text
+                                            for i in range(min(500, len(message))):
+                                                # If we hit non-printable bytes that aren't common in headers
+                                                if message[i] < 32 and message[i] not in [9, 10, 13]:  # Not tab, LF, CR
+                                                    audio_data = message[i:]
+                                                    print(f"🔵 Found binary start at position {i}, extracted: {len(audio_data)} bytes")
+                                                    break
+                                        except:
+                                            pass
+                                        
+                                        if audio_data is None:
+                                            print(f"🔵 Could not find audio data in Path:audio message")
+                                            continue
                                 
                                 # Method 4: Check for WAV or other audio format headers
                                 elif message.startswith(b'RIFF') or message.startswith(b'WAV') or message.startswith(b'\xff\xfb'):
@@ -263,13 +291,14 @@ class AzureStreamingTTS(TTS):
                                     continue
                                 
                                 # Method 5: Default - treat as raw PCM if it's large enough
-                                elif len(message) > 500:
-                                    # Most likely raw PCM audio data from Azure
-                                    audio_data = message
-                                    print(f"🔵 Treating as raw PCM: {len(audio_data)} bytes")
                                 else:
-                                    print(f"🔵 Skipped medium message: {len(message)} bytes")
-                                    continue
+                                    if len(message) > 500:
+                                        # Most likely raw PCM audio data from Azure
+                                        audio_data = message
+                                        print(f"🔵 Treating as raw PCM: {len(audio_data)} bytes")
+                                    else:
+                                        print(f"🔵 Skipped medium message: {len(message)} bytes")
+                                        continue
                                 
                                 # Add the clean audio data if we found any
                                 if audio_data and len(audio_data) > 0:
