@@ -332,11 +332,12 @@ class AzureStreamingTTS(TTS):
                 # Success! Reset failure counter
                 self._failed_requests = 0
                 
-                # Ensure audio data is properly aligned for 16-bit PCM
-                if len(audio_data) % 2 != 0:
-                    # Remove the last byte to make it even
+                # Only align the FINAL combined audio data if needed for LiveKit
+                total_bytes = len(audio_data)
+                if total_bytes % 2 != 0:
+                    # Remove the last byte from the final combined data to make it even
                     audio_data = audio_data[:-1]
-                    print(f"🔵 Aligned audio data: removed 1 byte, now {len(audio_data)} bytes")
+                    print(f"🔵 Final alignment: removed 1 byte from total, now {len(audio_data)} bytes")
                 
                 # Calculate samples per channel for 16-bit audio
                 samples_per_channel = len(audio_data) // (self._num_channels * 2)  # 2 bytes per sample (16-bit)
