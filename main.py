@@ -224,7 +224,7 @@ class AzureStreamingTTS(TTS):
                                     header = message[:header_end].decode('utf-8', errors='ignore')
                                     audio_data = message[header_end + 4:]  # Skip the \r\n\r\n
                                     
-                                    print(f"🔵 Header: {header[:100]}...")  # Truncate long headers
+                                    print(f"🔵 Header found: {header[:100]}...")  # Truncate long headers
                                     print(f"🔵 Raw audio data after header: {len(audio_data)} bytes")
                                     
                                     # Only add if this contains actual audio content
@@ -241,26 +241,30 @@ class AzureStreamingTTS(TTS):
                                         print(f"🔵 Skipped non-audio message with header")
                                         
                                 else:
-                                    # No standard header found - this might be a different format
-                                    # Check if this looks like raw audio data (large and reasonable size)
-                                    if len(message) > 8000:  # Audio chunks are typically quite large
-                                        # Ensure proper alignment for 16-bit PCM
-                                        if len(message) % 2 != 0:
-                                            aligned_message = message[:-1]
-                                            print(f"🔵 Raw audio aligned: {len(aligned_message)} bytes (removed 1 byte)")
-                                        else:
-                                            aligned_message = message
-                                            print(f"🔵 Raw audio (already aligned): {len(aligned_message)} bytes")
-                                        
-                                        audio_chunks.append(aligned_message)
-                                        print(f"🔵 Added raw audio chunk: {len(aligned_message)} bytes")
-                                    else:
+                                    # No header found - Azure sends audio as raw binary chunks
+                                    # Skip very small messages (likely metadata/control)
+                                    if len(message) < 1000:
                                         print(f"🔵 Skipped small message: {len(message)} bytes (likely metadata)")
+                                    else:
+                                        # This is likely a raw audio chunk - don't modify it!
+                                        # Azure sends properly formatted PCM data
+                                        print(f"🔵 Raw audio chunk detected: {len(message)} bytes")
+                                        
+                                        # Only align if actually needed (which it probably isn't)
+                                        if len(message) % 2 == 0:
+                                            # Already properly aligned - use as-is
+                                            audio_chunks.append(message)
+                                            print(f"🔵 Added raw audio chunk (already aligned): {len(message)} bytes")
+                                        else:
+                                            # Odd size - align it
+                                            aligned_message = message[:-1]
+                                            audio_chunks.append(aligned_message)
+                                            print(f"🔵 Added aligned audio chunk: {len(aligned_message)} bytes (removed 1 byte)")
                                 
                             except Exception as parse_error:
                                 print(f"🔵 Error parsing binary message: {parse_error}")
                                 # Last resort - if it's large enough, treat as raw audio
-                                if len(message) > 8000:
+                                if len(message) >= 1000:
                                     if len(message) % 2 == 0:
                                         audio_chunks.append(message)
                                         print(f"🔵 Added fallback audio chunk: {len(message)} bytes")
