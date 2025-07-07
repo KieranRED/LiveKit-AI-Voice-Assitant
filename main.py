@@ -165,7 +165,7 @@ class AzureStreamingTTS(TTS):
         return message
     
     def _extract_audio_from_message(self, message: bytes) -> Optional[bytes]:
-        """Extract clean PCM audio data from Azure WebSocket message - SIMPLE & RELIABLE"""
+        """Extract clean PCM audio data from Azure WebSocket message - BALANCED APPROACH"""
         try:
             # Check if this is a Path:audio message
             if b'Path:audio' not in message:
@@ -184,6 +184,7 @@ class AzureStreamingTTS(TTS):
                 b'\r\n\r\n',  # Standard HTTP
                 b'\n\n',      # Alternative
                 b'\r\r',      # Alternative
+                b'\x00\x00',  # Null separator
             ]
             
             best_audio = None
@@ -195,50 +196,43 @@ class AzureStreamingTTS(TTS):
                     audio_start = pattern_pos + len(pattern)
                     potential_audio = message[audio_start:]
                     
-                    # Quick validation - must be substantial and have variety
+                    # Must be substantial
                     if len(potential_audio) > 1000:
-                        # Check first 500 bytes for quality
-                        sample = potential_audio[:500]
+                        # Basic quality check - just verify it has some variety
+                        sample = potential_audio[:min(1000, len(potential_audio))]
                         unique_bytes = len(set(sample))
                         
-                        # Must have good byte variety (PCM audio characteristic)
-                        if unique_bytes > 100:
-                            # Check for text contamination in first part
+                        # Lower threshold - accept if it has reasonable variety
+                        if unique_bytes > 50:  # Reduced from 100
+                            # Light text contamination check
                             try:
                                 decoded = sample.decode('utf-8', errors='ignore')
                                 text_ratio = sum(1 for c in decoded if c.isalnum()) / len(decoded)
                                 
-                                # If less than 20% readable text, it's probably good audio
-                                if text_ratio < 0.2:
+                                # Accept if less than 30% readable text (was 20%)
+                                if text_ratio < 0.3:
                                     if len(potential_audio) > best_size:
                                         best_audio = potential_audio
                                         best_size = len(potential_audio)
                             except:
-                                # Can't decode as text, probably binary audio
+                                # Can't decode as text, probably binary audio - accept it
                                 if len(potential_audio) > best_size:
                                     best_audio = potential_audio
                                     best_size = len(potential_audio)
             
             # If we found good audio, do minimal cleaning
             if best_audio and len(best_audio) > 1000:
-                # Only remove header contamination from the very beginning
+                # Very light cleaning - just remove obvious header contamination from start
                 clean_start = 0
                 
-                # Look for the start of clean binary data (first 200 bytes max)
-                for i in range(0, min(200, len(best_audio)), 10):
-                    chunk = best_audio[i:i+100]
-                    if len(chunk) >= 100:
+                # Look for clean binary data in first 100 bytes only (was 200)
+                for i in range(0, min(100, len(best_audio)), 20):  # Bigger steps
+                    chunk = best_audio[i:i+50]  # Smaller test chunks
+                    if len(chunk) >= 50:
                         unique_vals = len(set(chunk))
-                        if unique_vals > 80:  # High variety = likely audio
-                            try:
-                                decoded = chunk.decode('utf-8', errors='ignore')
-                                text_chars = sum(1 for c in decoded if c.isalnum())
-                                if text_chars < len(decoded) * 0.1:  # Less than 10% text
-                                    clean_start = i
-                                    break
-                            except:
-                                clean_start = i
-                                break
+                        if unique_vals > 30:  # Lower threshold (was 80)
+                            clean_start = i
+                            break
                 
                 clean_audio = best_audio[clean_start:]
                 
@@ -249,6 +243,30 @@ class AzureStreamingTTS(TTS):
                 # Must be substantial
                 if len(clean_audio) > 1000:
                     return clean_audio
+            
+            # Fallback: if header patterns didn't work, try to find any substantial binary data
+            # This is more aggressive but necessary for Azure's inconsistent format
+            for start_pos in range(search_start, min(search_start + 1000, len(message) - 1000), 50):
+                potential_audio = message[start_pos:]
+                if len(potential_audio) > 5000:  # Must be substantial
+                    # Quick variety check
+                    sample = potential_audio[:1000]
+                    unique_bytes = len(set(sample))
+                    if unique_bytes > 80:  # Higher threshold for fallback
+                        # Light text check
+                        try:
+                            decoded = sample.decode('utf-8', errors='ignore')
+                            text_ratio = sum(1 for c in decoded if c.isalnum()) / len(decoded)
+                            if text_ratio < 0.2:  # Stricter for fallback
+                                # Align and return
+                                if len(potential_audio) % 2 != 0:
+                                    potential_audio = potential_audio[:-1]
+                                return potential_audio
+                        except:
+                            # Can't decode, probably good audio
+                            if len(potential_audio) % 2 != 0:
+                                potential_audio = potential_audio[:-1]
+                            return potential_audio
             
             return None
             
