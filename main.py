@@ -165,115 +165,147 @@ class AzureStreamingTTS(TTS):
         return message
     
     def _extract_audio_from_message(self, message: bytes) -> Optional[bytes]:
-        """Extract clean PCM audio data from Azure WebSocket message - BALANCED APPROACH"""
+        """Extract clean PCM audio data from Azure WebSocket message - AGGRESSIVE CLEANING"""
         try:
             # Check if this is a Path:audio message
             if b'Path:audio' not in message:
                 return None
             
-            # Find the Path:audio marker
-            path_audio_pos = message.find(b'Path:audio')
-            if path_audio_pos == -1:
-                return None
+            # Method 1: Look for WAV header patterns that Azure sometimes sends
+            wav_header_pos = message.find(b'RIFF')
+            if wav_header_pos != -1:
+                # This is a WAV file - extract the audio data after the header
+                wav_data = message[wav_header_pos:]
+                if len(wav_data) > 44:  # WAV header is 44 bytes
+                    # Skip WAV header and return raw PCM data
+                    return wav_data[44:]
             
-            # Look for standard HTTP header terminators after Path:audio
+            # Method 2: Look for binary PCM data patterns
+            # Azure sends raw PCM data, which should have good byte variety
+            # and no readable text patterns
+            
+            # Start search after Path:audio
+            path_audio_pos = message.find(b'Path:audio')
             search_start = path_audio_pos + len(b'Path:audio')
             
-            # Try the most common patterns Azure uses
-            header_patterns = [
-                b'\r\n\r\n',  # Standard HTTP
-                b'\n\n',      # Alternative
-                b'\r\r',      # Alternative
-                b'\x00\x00',  # Null separator
-            ]
+            # Look for the largest contiguous block of binary data
+            best_audio_start = None
+            best_audio_size = 0
             
-            best_audio = None
-            best_size = 0
+            # Scan through the message looking for binary data blocks
+            for start_pos in range(search_start, len(message) - 1000, 50):
+                # Test if this looks like PCM audio data
+                test_chunk = message[start_pos:start_pos + 1000]
+                
+                # Skip if it contains too much readable text
+                try:
+                    decoded = test_chunk.decode('utf-8', errors='ignore')
+                    readable_chars = sum(1 for c in decoded if c.isalnum() or c.isspace())
+                    if readable_chars > len(decoded) * 0.3:  # More than 30% readable = probably headers
+                        continue
+                except:
+                    pass
+                
+                # Check for good byte variety (PCM audio should have variety)
+                unique_bytes = len(set(test_chunk))
+                if unique_bytes < 100:  # Not enough variety for good audio
+                    continue
+                
+                # Check for patterns that suggest this is audio data
+                # PCM audio typically has values distributed across the range
+                byte_values = list(test_chunk)
+                if len(byte_values) > 0:
+                    # Calculate some basic statistics
+                    avg_val = sum(byte_values) / len(byte_values)
+                    # Good PCM audio should have average around 128 (middle of 0-255 range)
+                    if abs(avg_val - 128) > 50:
+                        continue
+                
+                # This looks like good audio data - find where it ends
+                audio_end = start_pos + 1000
+                for end_pos in range(start_pos + 1000, len(message), 1000):
+                    test_end_chunk = message[end_pos:end_pos + 100]
+                    if len(test_end_chunk) < 100:
+                        audio_end = end_pos
+                        break
+                    
+                    # Check if this chunk still looks like audio
+                    end_unique_bytes = len(set(test_end_chunk))
+                    if end_unique_bytes < 30:  # Lost variety, probably end of audio
+                        audio_end = end_pos
+                        break
+                    
+                    audio_end = end_pos + 100
+                
+                # Track the best (largest) audio block found
+                audio_size = audio_end - start_pos
+                if audio_size > best_audio_size:
+                    best_audio_start = start_pos
+                    best_audio_size = audio_size
+            
+            # If we found a good audio block, extract it
+            if best_audio_start is not None and best_audio_size > 1000:
+                audio_data = message[best_audio_start:best_audio_start + best_audio_size]
+                
+                # Final cleanup: remove any remaining header bytes at the start
+                # Look for the first sequence that looks like pure PCM
+                for i in range(0, min(200, len(audio_data)), 10):
+                    chunk = audio_data[i:i+100]
+                    if len(chunk) >= 100:
+                        # Check if this looks like clean PCM audio
+                        unique_vals = len(set(chunk))
+                        if unique_vals >= 50:  # Good variety
+                            # Check for text contamination
+                            try:
+                                decoded = chunk.decode('utf-8', errors='ignore')
+                                text_chars = sum(1 for c in decoded if c.isalnum())
+                                if text_chars < len(decoded) * 0.1:  # Less than 10% text
+                                    # This looks like clean audio
+                                    clean_audio = audio_data[i:]
+                                    if len(clean_audio) > 1000:
+                                        return clean_audio
+                            except:
+                                # Can't decode as text, probably good audio
+                                clean_audio = audio_data[i:]
+                                if len(clean_audio) > 1000:
+                                    return clean_audio
+                
+                # If no clean start found, return the best block we found
+                if len(audio_data) > 1000:
+                    return audio_data
+            
+            # Method 3: Fallback - look for standard header separators
+            header_patterns = [b'\r\n\r\n', b'\n\n', b'\r\r', b'\x00\x00']
             
             for pattern in header_patterns:
                 pattern_pos = message.find(pattern, search_start)
                 if pattern_pos != -1:
-                    audio_start = pattern_pos + len(pattern)
-                    potential_audio = message[audio_start:]
-                    
-                    # Must be substantial
+                    potential_audio = message[pattern_pos + len(pattern):]
                     if len(potential_audio) > 1000:
-                        # Basic quality check - just verify it has some variety
-                        sample = potential_audio[:min(1000, len(potential_audio))]
-                        unique_bytes = len(set(sample))
-                        
-                        # Lower threshold - accept if it has reasonable variety
-                        if unique_bytes > 50:  # Reduced from 100
-                            # Light text contamination check
-                            try:
-                                decoded = sample.decode('utf-8', errors='ignore')
-                                text_ratio = sum(1 for c in decoded if c.isalnum()) / len(decoded)
-                                
-                                # Accept if less than 30% readable text (was 20%)
-                                if text_ratio < 0.3:
-                                    if len(potential_audio) > best_size:
-                                        best_audio = potential_audio
-                                        best_size = len(potential_audio)
-                            except:
-                                # Can't decode as text, probably binary audio - accept it
-                                if len(potential_audio) > best_size:
-                                    best_audio = potential_audio
-                                    best_size = len(potential_audio)
+                        # Apply the same cleaning logic
+                        for i in range(0, min(200, len(potential_audio)), 10):
+                            chunk = potential_audio[i:i+100]
+                            if len(chunk) >= 100:
+                                unique_vals = len(set(chunk))
+                                if unique_vals >= 50:
+                                    try:
+                                        decoded = chunk.decode('utf-8', errors='ignore')
+                                        text_chars = sum(1 for c in decoded if c.isalnum())
+                                        if text_chars < len(decoded) * 0.1:
+                                            clean_audio = potential_audio[i:]
+                                            if len(clean_audio) > 1000:
+                                                return clean_audio
+                                    except:
+                                        clean_audio = potential_audio[i:]
+                                        if len(clean_audio) > 1000:
+                                            return clean_audio
             
-            # If we found good audio, do minimal cleaning
-            if best_audio and len(best_audio) > 1000:
-                # Very light cleaning - just remove obvious header contamination from start
-                clean_start = 0
-                
-                # Look for clean binary data in first 100 bytes only (was 200)
-                for i in range(0, min(100, len(best_audio)), 20):  # Bigger steps
-                    chunk = best_audio[i:i+50]  # Smaller test chunks
-                    if len(chunk) >= 50:
-                        unique_vals = len(set(chunk))
-                        if unique_vals > 30:  # Lower threshold (was 80)
-                            clean_start = i
-                            break
-                
-                clean_audio = best_audio[clean_start:]
-                
-                # Ensure 16-bit alignment
-                if len(clean_audio) % 2 != 0:
-                    clean_audio = clean_audio[:-1]
-                
-                # Must be substantial
-                if len(clean_audio) > 1000:
-                    return clean_audio
-            
-            # Fallback: if header patterns didn't work, try to find any substantial binary data
-            # This is more aggressive but necessary for Azure's inconsistent format
-            for start_pos in range(search_start, min(search_start + 1000, len(message) - 1000), 50):
-                potential_audio = message[start_pos:]
-                if len(potential_audio) > 5000:  # Must be substantial
-                    # Quick variety check
-                    sample = potential_audio[:1000]
-                    unique_bytes = len(set(sample))
-                    if unique_bytes > 80:  # Higher threshold for fallback
-                        # Light text check
-                        try:
-                            decoded = sample.decode('utf-8', errors='ignore')
-                            text_ratio = sum(1 for c in decoded if c.isalnum()) / len(decoded)
-                            if text_ratio < 0.2:  # Stricter for fallback
-                                # Align and return
-                                if len(potential_audio) % 2 != 0:
-                                    potential_audio = potential_audio[:-1]
-                                return potential_audio
-                        except:
-                            # Can't decode, probably good audio
-                            if len(potential_audio) % 2 != 0:
-                                potential_audio = potential_audio[:-1]
-                            return potential_audio
-            
+            # If nothing worked, return None
             return None
             
         except Exception as e:
             print(f"🔵 Error extracting audio from message: {e}")
             return None
-
     
     async def _websocket_synthesis(self, text: str) -> bytes:
         """Fixed WebSocket synthesis with proper audio extraction"""
