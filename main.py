@@ -42,12 +42,10 @@ from livekit.agents.stt import STT, SpeechEvent, SpeechEventType, STTCapabilitie
 from livekit.agents.tts import TTS, TTSCapabilities, SynthesizedAudio
 from livekit.plugins import openai as lk_openai, silero
 
-# Azure Speech Services WebSocket streaming implementation
 
-
-# Azure Streaming TTS Implementation using WebSocket API with OpenAI fallback
+# Azure Streaming TTS with proper streaming support and no pauses
 class AzureStreamingTTS(TTS):
-    """Azure Speech Services TTS with WebSocket streaming support and OpenAI fallback"""
+    """Azure Speech Services TTS with true streaming support"""
     
     def __init__(
         self,
@@ -55,7 +53,7 @@ class AzureStreamingTTS(TTS):
         region: str,
         voice: str = "en-US-AriaNeural",
         speed: float = 1.0,
-        streaming: bool = False  # Disable streaming for now, use regular synthesis
+        streaming: bool = True  # Enable streaming for low latency
     ):
         super().__init__(
             capabilities=TTSCapabilities(streaming=streaming),
@@ -67,8 +65,8 @@ class AzureStreamingTTS(TTS):
         self._region = region
         self._voice = voice
         self._speed = speed
-        self._failed_requests = 0  # Track failures for fallback logic
-        self._max_failures = 3     # Switch to fallback after 3 failures
+        self._failed_requests = 0
+        self._max_failures = 3
         
         # Azure WebSocket endpoints
         self._token_url = f"https://{region}.api.cognitive.microsoft.com/sts/v1.0/issuetoken"
@@ -82,11 +80,7 @@ class AzureStreamingTTS(TTS):
         except Exception as e:
             print(f"⚠️ Failed to initialize OpenAI fallback: {e}")
         
-        # Validate inputs
-        if not api_key or not region:
-            raise ValueError("Azure API key and region are required")
-        
-        print(f"🔵 Azure Streaming TTS initialized with voice: {voice}, speed: {speed}")
+        print(f"🔵 Azure Streaming TTS initialized with voice: {voice}, speed: {speed}, streaming: {streaming}")
     
     async def _use_fallback(self, text: str, request_id: str):
         """Use OpenAI TTS as fallback"""
@@ -95,15 +89,12 @@ class AzureStreamingTTS(TTS):
         
         print(f"🔄 Using OpenAI TTS fallback for: '{text[:50]}...'")
         
-        # Use the OpenAI TTS synthesize method
         async for result in self._openai_fallback.synthesize(text):
-            # Convert OpenAI result to our format
             yield SynthesizedAudio(
                 frame=result.frame,
                 request_id=request_id,
                 is_final=result.is_final
             )
-            return  # Only take the first result
     
     async def _get_access_token(self) -> str:
         """Get Azure access token"""
@@ -122,11 +113,13 @@ class AzureStreamingTTS(TTS):
         """Create SSML with voice and speed settings"""
         speed_rate = f"{self._speed:.1f}" if self._speed != 1.0 else "1.0"
         
+        # Add a small pause at the end to ensure smooth transitions
         return f"""
         <speak version='1.0' xml:lang='en-US' xmlns='http://www.w3.org/2001/10/synthesis'>
             <voice xml:lang='en-US' name='{self._voice}'>
                 <prosody rate='{speed_rate}'>
                     {text}
+                    <break time="50ms"/>
                 </prosody>
             </voice>
         </speak>
@@ -165,254 +158,29 @@ class AzureStreamingTTS(TTS):
         return message
     
     def _extract_audio_from_message(self, message: bytes) -> Optional[bytes]:
-        """Extract clean PCM audio data from Azure WebSocket message - AGGRESSIVE CLEANING"""
+        """Extract clean PCM audio data from Azure WebSocket message"""
         try:
-            # Check if this is a Path:audio message
             if b'Path:audio' not in message:
                 return None
             
-            # Method 1: Look for WAV header patterns that Azure sometimes sends
-            wav_header_pos = message.find(b'RIFF')
-            if wav_header_pos != -1:
-                # This is a WAV file - extract the audio data after the header
-                wav_data = message[wav_header_pos:]
-                if len(wav_data) > 44:  # WAV header is 44 bytes
-                    # Skip WAV header and return raw PCM data
-                    return wav_data[44:]
-            
-            # Method 2: Look for binary PCM data patterns
-            # Azure sends raw PCM data, which should have good byte variety
-            # and no readable text patterns
-            
-            # Start search after Path:audio
-            path_audio_pos = message.find(b'Path:audio')
-            search_start = path_audio_pos + len(b'Path:audio')
-            
-            # Look for the largest contiguous block of binary data
-            best_audio_start = None
-            best_audio_size = 0
-            
-            # Scan through the message looking for binary data blocks
-            for start_pos in range(search_start, len(message) - 1000, 50):
-                # Test if this looks like PCM audio data
-                test_chunk = message[start_pos:start_pos + 1000]
-                
-                # Skip if it contains too much readable text
-                try:
-                    decoded = test_chunk.decode('utf-8', errors='ignore')
-                    readable_chars = sum(1 for c in decoded if c.isalnum() or c.isspace())
-                    if readable_chars > len(decoded) * 0.3:  # More than 30% readable = probably headers
-                        continue
-                except:
-                    pass
-                
-                # Check for good byte variety (PCM audio should have variety)
-                unique_bytes = len(set(test_chunk))
-                if unique_bytes < 100:  # Not enough variety for good audio
-                    continue
-                
-                # Check for patterns that suggest this is audio data
-                # PCM audio typically has values distributed across the range
-                byte_values = list(test_chunk)
-                if len(byte_values) > 0:
-                    # Calculate some basic statistics
-                    avg_val = sum(byte_values) / len(byte_values)
-                    # Good PCM audio should have average around 128 (middle of 0-255 range)
-                    if abs(avg_val - 128) > 50:
-                        continue
-                
-                # This looks like good audio data - find where it ends
-                audio_end = start_pos + 1000
-                for end_pos in range(start_pos + 1000, len(message), 1000):
-                    test_end_chunk = message[end_pos:end_pos + 100]
-                    if len(test_end_chunk) < 100:
-                        audio_end = end_pos
-                        break
-                    
-                    # Check if this chunk still looks like audio
-                    end_unique_bytes = len(set(test_end_chunk))
-                    if end_unique_bytes < 30:  # Lost variety, probably end of audio
-                        audio_end = end_pos
-                        break
-                    
-                    audio_end = end_pos + 100
-                
-                # Track the best (largest) audio block found
-                audio_size = audio_end - start_pos
-                if audio_size > best_audio_size:
-                    best_audio_start = start_pos
-                    best_audio_size = audio_size
-            
-            # If we found a good audio block, extract it
-            if best_audio_start is not None and best_audio_size > 1000:
-                audio_data = message[best_audio_start:best_audio_start + best_audio_size]
-                
-                # Final cleanup: remove any remaining header bytes at the start
-                # Look for the first sequence that looks like pure PCM
-                for i in range(0, min(200, len(audio_data)), 10):
-                    chunk = audio_data[i:i+100]
-                    if len(chunk) >= 100:
-                        # Check if this looks like clean PCM audio
-                        unique_vals = len(set(chunk))
-                        if unique_vals >= 50:  # Good variety
-                            # Check for text contamination
-                            try:
-                                decoded = chunk.decode('utf-8', errors='ignore')
-                                text_chars = sum(1 for c in decoded if c.isalnum())
-                                if text_chars < len(decoded) * 0.1:  # Less than 10% text
-                                    # This looks like clean audio
-                                    clean_audio = audio_data[i:]
-                                    if len(clean_audio) > 1000:
-                                        return clean_audio
-                            except:
-                                # Can't decode as text, probably good audio
-                                clean_audio = audio_data[i:]
-                                if len(clean_audio) > 1000:
-                                    return clean_audio
-                
-                # If no clean start found, return the best block we found
-                if len(audio_data) > 1000:
+            # Find the audio data after the header
+            header_end = message.find(b'\r\n\r\n')
+            if header_end != -1:
+                audio_data = message[header_end + 4:]
+                if len(audio_data) > 0:
                     return audio_data
             
-            # Method 3: Fallback - look for standard header separators
-            header_patterns = [b'\r\n\r\n', b'\n\n', b'\r\r', b'\x00\x00']
-            
-            for pattern in header_patterns:
-                pattern_pos = message.find(pattern, search_start)
-                if pattern_pos != -1:
-                    potential_audio = message[pattern_pos + len(pattern):]
-                    if len(potential_audio) > 1000:
-                        # Apply the same cleaning logic
-                        for i in range(0, min(200, len(potential_audio)), 10):
-                            chunk = potential_audio[i:i+100]
-                            if len(chunk) >= 100:
-                                unique_vals = len(set(chunk))
-                                if unique_vals >= 50:
-                                    try:
-                                        decoded = chunk.decode('utf-8', errors='ignore')
-                                        text_chars = sum(1 for c in decoded if c.isalnum())
-                                        if text_chars < len(decoded) * 0.1:
-                                            clean_audio = potential_audio[i:]
-                                            if len(clean_audio) > 1000:
-                                                return clean_audio
-                                    except:
-                                        clean_audio = potential_audio[i:]
-                                        if len(clean_audio) > 1000:
-                                            return clean_audio
-            
-            # If nothing worked, return None
             return None
             
         except Exception as e:
             print(f"🔵 Error extracting audio from message: {e}")
             return None
     
-    async def _websocket_synthesis(self, text: str) -> bytes:
-        """Fixed WebSocket synthesis with proper audio extraction"""
-        try:
-            access_token = await self._get_access_token()
-            request_id = str(uuid.uuid4()).replace('-', '')
-            connection_id = str(uuid.uuid4()).replace('-', '')
-            
-            # Correct Azure WebSocket URL format
-            uri = f"{self._ws_url}?Authorization=Bearer%20{access_token}&X-ConnectionId={connection_id}"
-            
-            print(f"🔵 Connecting to Azure WebSocket: {self._region}")
-            
-            # Use basic WebSocket connection without extra parameters for maximum compatibility
-            async with websockets.connect(uri) as websocket:
-                print(f"🔵 Connected to Azure WebSocket")
-                
-                # Send configuration message
-                config_msg = self._create_config_message(request_id)
-                await websocket.send(config_msg)
-                print(f"🔵 Sent config message")
-                
-                # Send SSML message
-                ssml = self._create_ssml(text)
-                ssml_msg = self._create_ssml_message(request_id, ssml)
-                await websocket.send(ssml_msg)
-                print(f"🔵 Sent SSML message: {len(text)} chars")
-                
-                # Collect audio data with improved extraction
-                audio_chunks = []
-                received_turn_start = False
-                
-                try:
-                    while True:
-                        # Add timeout to prevent hanging
-                        message = await asyncio.wait_for(websocket.recv(), timeout=15.0)
-                        
-                        if isinstance(message, str):
-                            print(f"🔵 Received text message: {message[:100]}...")
-                            # Check for important path messages
-                            if 'Path:turn.start' in message:
-                                received_turn_start = True
-                                print("🔵 Turn started")
-                            elif 'Path:turn.end' in message:
-                                print("🔵 Turn ended")
-                                break
-                            elif 'Path:response' in message:
-                                print("🔵 Response message received")
-                        
-                        elif isinstance(message, bytes):
-                            print(f"🔵 Received binary message: {len(message)} bytes")
-                            
-                            # Skip very small messages (control/metadata)
-                            if len(message) < 100:
-                                continue
-                            
-                            # FIXED: More robust audio extraction
-                            audio_data = self._extract_audio_from_message(message)
-                            
-                            if audio_data and len(audio_data) >= 100:
-                                audio_chunks.append(audio_data)
-                                print(f"🔵 Added clean audio chunk: {len(audio_data)} bytes")
-                
-                except asyncio.TimeoutError:
-                    print("🔵 WebSocket timeout - ending collection")
-                
-                # Combine all audio chunks
-                total_audio = b"".join(audio_chunks)
-                print(f"🔵 Total audio collected: {len(total_audio)} bytes from {len(audio_chunks)} chunks")
-                
-                # Validate we got meaningful audio data
-                if len(total_audio) < 1000:
-                    print(f"⚠️ Audio data too small: {len(total_audio)} bytes, may be corrupted")
-                    # If we got almost nothing, throw an error to trigger fallback
-                    if len(total_audio) < 100:
-                        raise Exception("Azure returned insufficient audio data")
-                
-                # Ensure proper 16-bit PCM alignment
-                if len(total_audio) % 2 != 0:
-                    total_audio = total_audio[:-1]
-                    print(f"🔵 Aligned final audio: removed 1 byte, now {len(total_audio)} bytes")
-                
-                # Additional validation: check for reasonable audio characteristics
-                if len(total_audio) >= 1000:
-                    # Sample first 1000 bytes to check variety (audio should have good variety)
-                    sample = total_audio[:1000]
-                    unique_bytes = len(set(sample))
-                    if unique_bytes < 50:  # Too uniform, might be corrupted
-                        print(f"⚠️ Audio may be corrupted - low byte variety: {unique_bytes}/256")
-                        # Don't throw error here, just warn - some audio might be naturally uniform
-                
-                return total_audio
-                
-        except websockets.exceptions.WebSocketException as e:
-            print(f"❌ Azure WebSocket connection error: {e}")
-            raise Exception(f"WebSocket connection failed: {e}")
-        except Exception as e:
-            print(f"❌ Azure WebSocket synthesis error: {e}")
-            raise
-    
     async def synthesize(self, text: str, **kwargs):
-        """Synthesize speech using Azure WebSocket with OpenAI fallback - returns async generator for LiveKit compatibility"""
-        # Accept any additional kwargs that LiveKit might pass
-        conn_options = kwargs.get('conn_options', None)
+        """Stream speech with proper chunk handling for continuous audio"""
         request_id = str(uuid.uuid4())
         
-        # If we've had too many failures, use fallback immediately
+        # If we've had too many failures, use fallback
         if self._failed_requests >= self._max_failures:
             print(f"🔄 Too many Azure failures ({self._failed_requests}), using OpenAI fallback")
             if self._openai_fallback:
@@ -421,59 +189,113 @@ class AzureStreamingTTS(TTS):
                 return
         
         try:
-            start_time = time.time()
+            access_token = await self._get_access_token()
+            connection_id = str(uuid.uuid4()).replace('-', '')
             
-            # Try Azure WebSocket synthesis
-            audio_data = await self._websocket_synthesis(text)
+            uri = f"{self._ws_url}?Authorization=Bearer%20{access_token}&X-ConnectionId={connection_id}"
             
-            processing_time = time.time() - start_time
-            print(f"🔵 Azure WebSocket TTS: Generated {len(audio_data)} bytes in {processing_time:.3f}s")
+            print(f"🔵 Starting streaming synthesis for: '{text[:50]}...'")
             
-            # Check if we actually got audio data
-            if len(audio_data) == 0:
-                self._failed_requests += 1
-                print(f"⚠️ Azure TTS returned 0 bytes (failure #{self._failed_requests}) - trying fallback")
+            async with websockets.connect(uri) as websocket:
+                # Send configuration
+                config_msg = self._create_config_message(request_id)
+                await websocket.send(config_msg)
                 
-                if self._openai_fallback:
-                    async for result in self._use_fallback(text, request_id):
-                        yield result
-                    return
-                else:
-                    # Create empty frame if no fallback
-                    audio_frame = rtc.AudioFrame.create(
-                        sample_rate=self._sample_rate,
-                        num_channels=self._num_channels,
-                        samples_per_channel=0
-                    )
-            else:
-                # Success! Reset failure counter
+                # Send SSML
+                ssml = self._create_ssml(text)
+                ssml_msg = self._create_ssml_message(request_id, ssml)
+                await websocket.send(ssml_msg)
+                
+                # Stream audio chunks with buffering for smooth playback
+                audio_buffer = bytearray()
+                chunk_count = 0
+                first_chunk_time = None
+                min_buffer_size = 48000  # 0.5 seconds of audio at 48kHz, 16-bit mono
+                
+                try:
+                    while True:
+                        message = await asyncio.wait_for(websocket.recv(), timeout=15.0)
+                        
+                        if isinstance(message, str):
+                            if 'Path:turn.end' in message:
+                                # Yield any remaining buffered audio
+                                if len(audio_buffer) > 0:
+                                    samples = len(audio_buffer) // 2
+                                    frame = rtc.AudioFrame(
+                                        data=bytes(audio_buffer),
+                                        sample_rate=self._sample_rate,
+                                        num_channels=self._num_channels,
+                                        samples_per_channel=samples
+                                    )
+                                    yield SynthesizedAudio(
+                                        frame=frame,
+                                        request_id=request_id,
+                                        is_final=True
+                                    )
+                                break
+                        
+                        elif isinstance(message, bytes):
+                            audio_data = self._extract_audio_from_message(message)
+                            
+                            if audio_data and len(audio_data) >= 100:
+                                # Add to buffer
+                                audio_buffer.extend(audio_data)
+                                
+                                # For first chunk, start streaming immediately for lowest latency
+                                if chunk_count == 0:
+                                    first_chunk_time = time.time()
+                                    # Yield first chunk immediately
+                                    if len(audio_buffer) >= 9600:  # 0.1 seconds minimum
+                                        # Yield in reasonable chunk sizes
+                                        chunk_size = min(len(audio_buffer), 96000)  # Max 1 second
+                                        chunk_data = audio_buffer[:chunk_size]
+                                        audio_buffer = audio_buffer[chunk_size:]
+                                        
+                                        samples = len(chunk_data) // 2
+                                        frame = rtc.AudioFrame(
+                                            data=bytes(chunk_data),
+                                            sample_rate=self._sample_rate,
+                                            num_channels=self._num_channels,
+                                            samples_per_channel=samples
+                                        )
+                                        yield SynthesizedAudio(
+                                            frame=frame,
+                                            request_id=request_id,
+                                            is_final=False
+                                        )
+                                        print(f"🔵 Streamed first chunk after {time.time() - first_chunk_time:.3f}s")
+                                
+                                # For subsequent chunks, buffer enough to ensure smooth playback
+                                elif len(audio_buffer) >= min_buffer_size:
+                                    # Yield buffered audio in chunks
+                                    chunk_size = min(len(audio_buffer), 96000)
+                                    chunk_data = audio_buffer[:chunk_size]
+                                    audio_buffer = audio_buffer[chunk_size:]
+                                    
+                                    samples = len(chunk_data) // 2
+                                    frame = rtc.AudioFrame(
+                                        data=bytes(chunk_data),
+                                        sample_rate=self._sample_rate,
+                                        num_channels=self._num_channels,
+                                        samples_per_channel=samples
+                                    )
+                                    yield SynthesizedAudio(
+                                        frame=frame,
+                                        request_id=request_id,
+                                        is_final=False
+                                    )
+                                
+                                chunk_count += 1
+                
+                except asyncio.TimeoutError:
+                    print(f"🔵 WebSocket timeout - streamed {chunk_count} chunks")
+                
+                # Success - reset failure counter
                 self._failed_requests = 0
                 
-                # Calculate samples per channel for 16-bit audio
-                samples_per_channel = len(audio_data) // (self._num_channels * 2)  # 2 bytes per sample (16-bit)
-                
-                print(f"🔵 Creating AudioFrame: {len(audio_data)} bytes, {samples_per_channel} samples per channel")
-                
-                audio_frame = rtc.AudioFrame(
-                    data=audio_data,
-                    sample_rate=self._sample_rate,
-                    num_channels=self._num_channels,
-                    samples_per_channel=samples_per_channel
-                )
-            
-            synthesized_audio = SynthesizedAudio(
-                frame=audio_frame,
-                request_id=request_id,
-                is_final=True
-            )
-            
-            # LiveKit expects an async generator, so yield the result
-            yield synthesized_audio
-            
         except Exception as e:
             self._failed_requests += 1
             print(f"❌ Azure TTS Error (failure #{self._failed_requests}): {e}")
-            print(f"❌ Error type: {type(e).__name__}")
             
             # Try fallback on error
             if self._openai_fallback:
@@ -485,7 +307,7 @@ class AzureStreamingTTS(TTS):
                 except Exception as fallback_error:
                     print(f"❌ Fallback also failed: {fallback_error}")
             
-            # If all else fails, create empty frame to prevent crashes
+            # If all else fails, yield empty frame
             empty_frame = rtc.AudioFrame.create(
                 sample_rate=self._sample_rate,
                 num_channels=self._num_channels,
@@ -496,7 +318,6 @@ class AzureStreamingTTS(TTS):
                 request_id=request_id,
                 is_final=True
             )
-
 
 
 # Check environment variables at startup
@@ -856,9 +677,9 @@ async def entrypoint(ctx: JobContext):
                 region=azure_region,
                 voice="en-US-AriaNeural",  # Professional female voice
                 speed=1.1,                 # 10% faster speech
-                streaming=False            # Disable streaming for now to get basic working
+                streaming=True             # Enable streaming for low latency!
             )
-            print("🚀 Using Azure WebSocket TTS for fast speech synthesis!")
+            print("🚀 Using Azure Streaming TTS for fast speech synthesis!")
         except Exception as e:
             print(f"⚠️ Azure TTS initialization failed, falling back to OpenAI: {e}")
             tts_engine = lk_openai.TTS(voice="alloy", speed=1.1)
@@ -874,7 +695,7 @@ async def entrypoint(ctx: JobContext):
             llm=lk_openai.LLM(model="gpt-4o-mini"),
             tts=tts_engine,
         )
-        print("🚀 Using Groq STT + Azure WebSocket TTS for ultra-fast speech processing!")
+        print("🚀 Using Groq STT + Azure Streaming TTS for ultra-fast speech processing!")
     else:
         # Full fallback to OpenAI
         session = AgentSession(
