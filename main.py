@@ -145,6 +145,8 @@ class AzureStreamingTTS(TTS):
             }
         }
         
+        print(f"🔵 Using audio config: {config}")
+        
         message = f"X-RequestId:{request_id}\r\n"
         message += "Content-Type:application/json; charset=utf-8\r\n"
         message += f"Path:speech.config\r\n\r\n"
@@ -154,6 +156,9 @@ class AzureStreamingTTS(TTS):
     
     def _create_ssml_message(self, request_id: str, ssml: str) -> str:
         """Create SSML message for WebSocket"""
+        print(f"🔵 Creating SSML message with text length: {len(ssml)}")
+        print(f"🔵 SSML content: {ssml}")
+        
         message = f"X-RequestId:{request_id}\r\n"
         message += "Content-Type:application/ssml+xml\r\n"
         message += f"Path:ssml\r\n\r\n"
@@ -162,82 +167,92 @@ class AzureStreamingTTS(TTS):
         return message
     
     def _extract_audio_from_message(self, message: bytes) -> Optional[bytes]:
-        """Extract clean PCM audio data from Azure WebSocket message - FIXED VERSION"""
+        """Extract clean PCM audio data from Azure WebSocket message - ENHANCED DEBUG VERSION"""
         try:
-            # Handle binary messages that contain audio data
-            if isinstance(message, bytes) and len(message) > 200:
-                # Look for the binary header pattern that indicates audio data
-                # Azure sends: [2-byte length][headers]\r\n\r\n[audio data]
+            # Debug: Log message details
+            print(f"🔵 Processing message: type={type(message)}, len={len(message) if hasattr(message, '__len__') else 'N/A'}")
+            
+            if isinstance(message, bytes) and len(message) > 50:
+                # Debug: Show first 200 bytes of the message in readable format
+                preview = message[:200]
+                print(f"🔵 Message preview (first 200 bytes): {preview}")
                 
-                # Method 1: Look for the Path:audio header followed by audio data
+                # Check for Path:audio in the message
                 if b'Path:audio' in message:
-                    # Find the end of headers (double CRLF)
-                    header_end = message.find(b'\r\n\r\n')
+                    print(f"🔵 Found 'Path:audio' in message")
+                    
+                    # Find header end
+                    header_patterns = [b'\r\n\r\n', b'\n\n']
+                    header_end = -1
+                    
+                    for pattern in header_patterns:
+                        header_end = message.find(pattern)
+                        if header_end != -1:
+                            print(f"🔵 Found header end at position {header_end} with pattern {pattern}")
+                            break
+                    
                     if header_end != -1:
-                        # Skip past the header terminator
-                        audio_start = header_end + 4
-                        
-                        # Extract the audio portion
+                        audio_start = header_end + len(pattern)
                         audio_data = message[audio_start:]
                         
-                        # Skip any additional null padding at the start
-                        # Look for the actual start of audio data (non-zero bytes)
-                        start_idx = 0
-                        while start_idx < len(audio_data) and start_idx < 100:
-                            if audio_data[start_idx] != 0 or audio_data[start_idx + 1:start_idx + 10] != b'\x00' * 9:
-                                break
-                            start_idx += 1
+                        print(f"🔵 Raw audio section length: {len(audio_data)} bytes")
                         
-                        if start_idx < len(audio_data):
-                            audio_data = audio_data[start_idx:]
-                        
-                        # Ensure we have substantial audio data and it's properly aligned for 16-bit samples
-                        if len(audio_data) >= 200:  # Must have meaningful audio data
-                            # Ensure even length for 16-bit samples
-                            if len(audio_data) % 2 == 1:
-                                audio_data = audio_data[:-1]
+                        if len(audio_data) > 0:
+                            # Show first few bytes of audio data
+                            audio_preview = audio_data[:50] if len(audio_data) >= 50 else audio_data
+                            print(f"🔵 Audio data preview: {audio_preview}")
                             
-                            print(f"🔵 Extracted clean audio: {len(audio_data)} bytes")
-                            return audio_data
-                
-                # Method 2: If no clear header, check if this is mostly audio data
-                # (for chunks that might not have full headers)
-                elif len(message) > 1000:  # Substantial data
-                    # Skip any initial header bytes and look for audio patterns
-                    potential_start = 0
-                    
-                    # Look for common Azure header patterns and skip them
-                    if message.startswith(b'\x00\x85'):  # Common Azure binary header
-                        # Find where actual audio might start
-                        for i in range(min(300, len(message) - 100)):
-                            # Look for transition from headers to audio data
-                            if message[i:i+4] == b'\r\n\r\n':
-                                potential_start = i + 4
-                                break
-                            elif message[i:i+10] == b'\x00' * 10:  # Padding section
-                                # Skip padding
-                                j = i
-                                while j < len(message) - 1 and message[j] == 0:
-                                    j += 1
-                                if j < len(message) - 100:  # Found end of padding with substantial data left
-                                    potential_start = j
+                            # Skip initial null bytes but be less aggressive
+                            start_idx = 0
+                            while start_idx < len(audio_data) and start_idx < 50:
+                                if audio_data[start_idx] != 0:
                                     break
+                                start_idx += 1
+                            
+                            if start_idx > 0:
+                                print(f"🔵 Skipped {start_idx} null bytes at start")
+                                audio_data = audio_data[start_idx:]
+                            
+                            # Be more lenient with minimum audio size
+                            if len(audio_data) >= 100:  # Reduced from 200
+                                # Ensure even length for 16-bit samples
+                                if len(audio_data) % 2 == 1:
+                                    audio_data = audio_data[:-1]
+                                    print(f"🔵 Trimmed 1 byte for even length")
+                                
+                                print(f"🔵 ✅ Extracted audio: {len(audio_data)} bytes")
+                                return audio_data
+                            else:
+                                print(f"🔵 ❌ Audio data too small: {len(audio_data)} bytes")
+                
+                # Try alternative extraction for any binary data > 1KB
+                elif len(message) > 1000:
+                    print(f"🔵 Trying alternative extraction for large message")
                     
-                    if potential_start > 0 and potential_start < len(message) - 100:
-                        audio_data = message[potential_start:]
-                        
-                        # Ensure even length
-                        if len(audio_data) % 2 == 1:
-                            audio_data = audio_data[:-1]
-                        
-                        if len(audio_data) >= 200:
-                            print(f"🔵 Extracted audio from chunk: {len(audio_data)} bytes")
-                            return audio_data
+                    # Look for binary audio patterns - try different starting points
+                    for start_offset in [0, 100, 200, 300]:
+                        if start_offset >= len(message):
+                            continue
+                            
+                        test_data = message[start_offset:]
+                        if len(test_data) >= 500:  # Must have substantial data
+                            # Ensure even length
+                            if len(test_data) % 2 == 1:
+                                test_data = test_data[:-1]
+                            
+                            print(f"🔵 ✅ Alternative extraction from offset {start_offset}: {len(test_data)} bytes")
+                            return test_data
+                
+                print(f"🔵 ❌ No extractable audio found in message")
+            else:
+                print(f"🔵 ❌ Message too small or wrong type")
             
             return None
             
         except Exception as e:
-            print(f"🔵 Error extracting audio: {e}")
+            print(f"🔵 ❌ Error extracting audio: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     # CRITICAL: Implement the stream() method that LiveKit expects
@@ -361,7 +376,11 @@ class AzureStreamingTTS(TTS):
                     while True:
                         message = await asyncio.wait_for(websocket.recv(), timeout=15.0)
                         
+                        # Enhanced logging for debugging
+                        print(f"🔵 WebSocket received: type={type(message)}, len={len(message) if hasattr(message, '__len__') else 'N/A'}")
+                        
                         if isinstance(message, str):
+                            print(f"🔵 String message preview: {message[:200]}...")
                             if 'Path:turn.end' in message:
                                 print(f"🔵 Turn end detected, final buffer: {len(audio_buffer)} bytes")
                                 # Yield any remaining buffer
@@ -393,7 +412,7 @@ class AzureStreamingTTS(TTS):
                             if audio_data and len(audio_data) > 0:
                                 total_audio_received += len(audio_data)
                                 audio_buffer.extend(audio_data)
-                                print(f"🔵 Added {len(audio_data)} bytes, buffer now: {len(audio_buffer)} bytes")
+                                print(f"🔵 ✅ Added {len(audio_data)} bytes, buffer now: {len(audio_buffer)} bytes")
                                 
                                 # Stream in larger, more stable chunks to reduce static
                                 # Use 0.2 second chunks (19200 bytes at 48kHz 16-bit mono)
@@ -422,7 +441,11 @@ class AzureStreamingTTS(TTS):
                                     if chunk_count == 1:
                                         print(f"🔵 First audio chunk after {time.time() - first_chunk_time:.3f}s")
                                     
-                                    print(f"🔵 Streamed chunk #{chunk_count}: {samples} samples")
+                                    print(f"🔵 ✅ Streamed chunk #{chunk_count}: {samples} samples")
+                            else:
+                                print(f"🔵 ❌ No audio extracted from this message")
+                        else:
+                            print(f"🔵 ❌ Unknown message type: {type(message)}")
                 
                 except asyncio.TimeoutError:
                     print(f"🔵 WebSocket timeout after {chunk_count} chunks")
