@@ -113,7 +113,7 @@ class AzureStreamingTTS(TTS):
         """Create SSML with voice and speed settings"""
         speed_rate = f"{self._speed:.1f}" if self._speed != 1.0 else "1.0"
         
-        return f"""
+        ssml = f"""
         <speak version='1.0' xml:lang='en-US' xmlns='http://www.w3.org/2001/10/synthesis'>
             <voice xml:lang='en-US' name='{self._voice}'>
                 <prosody rate='{speed_rate}'>
@@ -122,6 +122,9 @@ class AzureStreamingTTS(TTS):
             </voice>
         </speak>
         """.strip()
+        
+        print(f"🔵 Created SSML: {ssml[:200]}...")
+        return ssml
     
     def _create_config_message(self, request_id: str) -> str:
         """Create WebSocket configuration message"""
@@ -272,14 +275,18 @@ class AzureStreamingTTS(TTS):
             print(f"🔵 Starting Azure WebSocket synthesis...")
             
             async with websockets.connect(uri) as websocket:
+                print(f"🔵 Azure WebSocket connected successfully")
+                
                 # Send configuration
                 config_msg = self._create_config_message(request_id)
                 await websocket.send(config_msg)
+                print(f"🔵 Sent config message: {len(config_msg)} bytes")
                 
                 # Send SSML
                 ssml = self._create_ssml(text)
                 ssml_msg = self._create_ssml_message(request_id, ssml)
                 await websocket.send(ssml_msg)
+                print(f"🔵 Sent SSML message: {len(ssml_msg)} bytes")
                 
                 # Stream audio chunks
                 audio_buffer = bytearray()
@@ -289,9 +296,12 @@ class AzureStreamingTTS(TTS):
                 try:
                     while True:
                         message = await asyncio.wait_for(websocket.recv(), timeout=15.0)
+                        print(f"🔵 Azure WebSocket received message: {type(message)}, length: {len(message) if hasattr(message, '__len__') else 'N/A'}")
                         
                         if isinstance(message, str):
+                            print(f"🔵 String message: {message[:200]}...")
                             if 'Path:turn.end' in message:
+                                print(f"🔵 Turn end detected, final buffer size: {len(audio_buffer)}")
                                 # Yield final chunk if any data remains
                                 if len(audio_buffer) > 0:
                                     samples = len(audio_buffer) // 2
@@ -306,13 +316,16 @@ class AzureStreamingTTS(TTS):
                                         request_id=request_id,
                                         is_final=True
                                     )
+                                    print(f"🔵 Yielded final audio chunk: {samples} samples")
                                 break
                         
                         elif isinstance(message, bytes):
                             audio_data = self._extract_audio_from_message(message)
+                            print(f"🔵 Extracted audio data: {len(audio_data) if audio_data else 0} bytes")
                             
                             if audio_data and len(audio_data) >= 100:
                                 audio_buffer.extend(audio_data)
+                                print(f"🔵 Audio buffer size: {len(audio_buffer)} bytes")
                                 
                                 # Stream in reasonable chunks for smooth playback
                                 if len(audio_buffer) >= 9600:  # ~0.1 seconds at 48kHz
@@ -339,6 +352,7 @@ class AzureStreamingTTS(TTS):
                                         print(f"🔵 First audio chunk streamed after {time.time() - first_chunk_time:.3f}s")
                                     
                                     chunk_count += 1
+                                    print(f"🔵 Yielded audio chunk #{chunk_count}: {samples} samples")
                 
                 except asyncio.TimeoutError:
                     print(f"🔵 WebSocket timeout - streamed {chunk_count} chunks")
