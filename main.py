@@ -43,9 +43,9 @@ from livekit.agents.tts import TTS, TTSCapabilities, SynthesizedAudio
 from livekit.plugins import openai as lk_openai, silero
 
 
-# Azure Streaming TTS with proper streaming support and no pauses
+# Azure Streaming TTS with proper LiveKit streaming support - FIXED VERSION
 class AzureStreamingTTS(TTS):
-    """Azure Speech Services TTS with true streaming support"""
+    """Azure Speech Services TTS with proper LiveKit streaming interface"""
     
     def __init__(
         self,
@@ -53,7 +53,7 @@ class AzureStreamingTTS(TTS):
         region: str,
         voice: str = "en-US-AriaNeural",
         speed: float = 1.0,
-        streaming: bool = True  # Enable streaming for low latency
+        streaming: bool = True
     ):
         super().__init__(
             capabilities=TTSCapabilities(streaming=streaming),
@@ -113,13 +113,11 @@ class AzureStreamingTTS(TTS):
         """Create SSML with voice and speed settings"""
         speed_rate = f"{self._speed:.1f}" if self._speed != 1.0 else "1.0"
         
-        # Add a small pause at the end to ensure smooth transitions
         return f"""
         <speak version='1.0' xml:lang='en-US' xmlns='http://www.w3.org/2001/10/synthesis'>
             <voice xml:lang='en-US' name='{self._voice}'>
                 <prosody rate='{speed_rate}'>
                     {text}
-                    <break time="50ms"/>
                 </prosody>
             </voice>
         </speak>
@@ -176,10 +174,36 @@ class AzureStreamingTTS(TTS):
             print(f"🔵 Error extracting audio from message: {e}")
             return None
     
-    async def synthesize(self, text: str, **kwargs):
-        """Stream speech with proper chunk handling for continuous audio"""
-        request_id = str(uuid.uuid4())
-        
+    # CRITICAL: Implement the stream() method that LiveKit expects
+    async def stream(self) -> AsyncGenerator[None, str]:
+        """
+        LiveKit streaming interface - this is what was missing!
+        This method yields control back to LiveKit and receives text to synthesize
+        """
+        try:
+            while True:
+                # Wait for text input from LiveKit
+                text = yield
+                if text is None:
+                    break
+                
+                print(f"🔵 Azure TTS streaming: '{text[:50]}...'")
+                
+                # Generate audio and send it back via the synthesize method
+                request_id = str(uuid.uuid4())
+                async for audio_chunk in self._synthesize_streaming(text, request_id):
+                    # Send audio chunk back to LiveKit
+                    yield audio_chunk
+                    
+        except Exception as e:
+            print(f"❌ Azure TTS stream error: {e}")
+            # Fall back to OpenAI if available
+            if self._openai_fallback:
+                async for chunk in self._openai_fallback.stream():
+                    yield chunk
+    
+    async def _synthesize_streaming(self, text: str, request_id: str):
+        """Internal method to handle Azure WebSocket streaming"""
         # If we've had too many failures, use fallback
         if self._failed_requests >= self._max_failures:
             print(f"🔄 Too many Azure failures ({self._failed_requests}), using OpenAI fallback")
@@ -194,7 +218,7 @@ class AzureStreamingTTS(TTS):
             
             uri = f"{self._ws_url}?Authorization=Bearer%20{access_token}&X-ConnectionId={connection_id}"
             
-            print(f"🔵 Starting streaming synthesis for: '{text[:50]}...'")
+            print(f"🔵 Starting Azure WebSocket synthesis...")
             
             async with websockets.connect(uri) as websocket:
                 # Send configuration
@@ -206,11 +230,10 @@ class AzureStreamingTTS(TTS):
                 ssml_msg = self._create_ssml_message(request_id, ssml)
                 await websocket.send(ssml_msg)
                 
-                # Stream audio chunks with buffering for smooth playback
+                # Stream audio chunks
                 audio_buffer = bytearray()
                 chunk_count = 0
-                first_chunk_time = None
-                min_buffer_size = 48000  # 0.5 seconds of audio at 48kHz, 16-bit mono
+                first_chunk_time = time.time()
                 
                 try:
                     while True:
@@ -218,7 +241,7 @@ class AzureStreamingTTS(TTS):
                         
                         if isinstance(message, str):
                             if 'Path:turn.end' in message:
-                                # Yield any remaining buffered audio
+                                # Yield final chunk if any data remains
                                 if len(audio_buffer) > 0:
                                     samples = len(audio_buffer) // 2
                                     frame = rtc.AudioFrame(
@@ -238,37 +261,11 @@ class AzureStreamingTTS(TTS):
                             audio_data = self._extract_audio_from_message(message)
                             
                             if audio_data and len(audio_data) >= 100:
-                                # Add to buffer
                                 audio_buffer.extend(audio_data)
                                 
-                                # For first chunk, start streaming immediately for lowest latency
-                                if chunk_count == 0:
-                                    first_chunk_time = time.time()
-                                    # Yield first chunk immediately
-                                    if len(audio_buffer) >= 9600:  # 0.1 seconds minimum
-                                        # Yield in reasonable chunk sizes
-                                        chunk_size = min(len(audio_buffer), 96000)  # Max 1 second
-                                        chunk_data = audio_buffer[:chunk_size]
-                                        audio_buffer = audio_buffer[chunk_size:]
-                                        
-                                        samples = len(chunk_data) // 2
-                                        frame = rtc.AudioFrame(
-                                            data=bytes(chunk_data),
-                                            sample_rate=self._sample_rate,
-                                            num_channels=self._num_channels,
-                                            samples_per_channel=samples
-                                        )
-                                        yield SynthesizedAudio(
-                                            frame=frame,
-                                            request_id=request_id,
-                                            is_final=False
-                                        )
-                                        print(f"🔵 Streamed first chunk after {time.time() - first_chunk_time:.3f}s")
-                                
-                                # For subsequent chunks, buffer enough to ensure smooth playback
-                                elif len(audio_buffer) >= min_buffer_size:
-                                    # Yield buffered audio in chunks
-                                    chunk_size = min(len(audio_buffer), 96000)
+                                # Stream in reasonable chunks for smooth playback
+                                if len(audio_buffer) >= 9600:  # ~0.1 seconds at 48kHz
+                                    chunk_size = min(len(audio_buffer), 48000)  # Max 0.5 seconds
                                     chunk_data = audio_buffer[:chunk_size]
                                     audio_buffer = audio_buffer[chunk_size:]
                                     
@@ -279,13 +276,18 @@ class AzureStreamingTTS(TTS):
                                         num_channels=self._num_channels,
                                         samples_per_channel=samples
                                     )
+                                    
+                                    is_final = False
                                     yield SynthesizedAudio(
                                         frame=frame,
                                         request_id=request_id,
-                                        is_final=False
+                                        is_final=is_final
                                     )
-                                
-                                chunk_count += 1
+                                    
+                                    if chunk_count == 0:
+                                        print(f"🔵 First audio chunk streamed after {time.time() - first_chunk_time:.3f}s")
+                                    
+                                    chunk_count += 1
                 
                 except asyncio.TimeoutError:
                     print(f"🔵 WebSocket timeout - streamed {chunk_count} chunks")
@@ -318,6 +320,13 @@ class AzureStreamingTTS(TTS):
                 request_id=request_id,
                 is_final=True
             )
+    
+    # Keep the original synthesize method for backward compatibility
+    async def synthesize(self, text: str, **kwargs):
+        """Non-streaming synthesis (fallback)"""
+        request_id = str(uuid.uuid4())
+        async for result in self._synthesize_streaming(text, request_id):
+            yield result
 
 
 # Check environment variables at startup
