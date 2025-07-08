@@ -302,7 +302,7 @@ class AzureStreamingTTS(TTS):
             self._current_text = text
     
     async def _synthesize_streaming(self, text: str, request_id: str):
-        """SIMPLIFIED: Clean audio extraction + stable streaming"""
+        """CLEAN VERSION: Perfect audio continuity + single frame"""
         if self._failed_requests >= self._max_failures:
             print(f"🔄 Too many Azure failures ({self._failed_requests}), using OpenAI fallback")
             if self._openai_fallback:
@@ -329,9 +329,10 @@ class AzureStreamingTTS(TTS):
                 await websocket.send(ssml_msg)
                 print(f"🔵 SSML sent, waiting for audio...")
                 
-                # SIMPLE collection - no complex buffering
-                all_audio_data = []
+                # Collect raw audio with careful alignment
+                all_audio_chunks = []
                 first_audio_time = time.time()
+                total_audio_bytes = 0
                 
                 try:
                     while True:
@@ -343,34 +344,52 @@ class AzureStreamingTTS(TTS):
                                 break
                         
                         elif isinstance(message, bytes):
-                            # Use SIMPLE audio extraction
+                            # Extract audio data
                             audio_data = self._extract_audio_from_message(message)
                             
                             if audio_data and len(audio_data) > 0:
-                                all_audio_data.append(audio_data)
+                                # Ensure this chunk is properly aligned (16-bit boundary)
+                                if len(audio_data) % 2 == 1:
+                                    audio_data = audio_data[:-1]
+                                    print(f"🔵 Aligned chunk: removed 1 byte")
                                 
-                                if len(all_audio_data) == 1:
-                                    latency = time.time() - first_audio_time
-                                    print(f"🔵 First audio after {latency:.3f}s")
+                                if len(audio_data) > 0:
+                                    all_audio_chunks.append(audio_data)
+                                    total_audio_bytes += len(audio_data)
+                                    
+                                    if len(all_audio_chunks) == 1:
+                                        latency = time.time() - first_audio_time
+                                        print(f"🔵 First audio after {latency:.3f}s")
+                                    
+                                    print(f"🔵 ✅ Collected chunk #{len(all_audio_chunks)}: {len(audio_data)} bytes")
                 
                 except asyncio.TimeoutError:
                     print(f"🔵 WebSocket timeout")
                 
-                # Combine ALL audio at once (like the working version)
-                if all_audio_data:
-                    total_audio = b"".join(all_audio_data)
-                    print(f"🔵 Combined audio: {len(total_audio)} bytes from {len(all_audio_data)} chunks")
+                # CAREFUL COMBINATION: Ensure perfect audio continuity
+                if all_audio_chunks:
+                    print(f"🔵 Combining {len(all_audio_chunks)} chunks totaling {total_audio_bytes} bytes...")
                     
-                    # Ensure even length
-                    if len(total_audio) % 2 == 1:
-                        total_audio = total_audio[:-1]
+                    # Method 1: Simple concatenation (what we were doing)
+                    combined_audio = b"".join(all_audio_chunks)
                     
-                    # Create ONE big audio frame (no streaming chunks)
-                    if len(total_audio) >= 2:
-                        samples_per_channel = len(total_audio) // 2
+                    # Method 2: Validate and clean the combined audio
+                    # Remove any potential header remnants that might have slipped through
+                    clean_audio = self._clean_combined_audio(combined_audio)
+                    
+                    # Final validation
+                    if len(clean_audio) % 2 == 1:
+                        clean_audio = clean_audio[:-1]
+                        print(f"🔵 Final alignment: removed 1 byte")
+                    
+                    print(f"🔵 Final audio: {len(clean_audio)} bytes ({len(clean_audio)//2} samples)")
+                    
+                    # Create single audio frame
+                    if len(clean_audio) >= 2:
+                        samples_per_channel = len(clean_audio) // 2
                         
                         frame = rtc.AudioFrame(
-                            data=total_audio,
+                            data=clean_audio,
                             sample_rate=self._sample_rate,
                             num_channels=self._num_channels,
                             samples_per_channel=samples_per_channel
@@ -378,7 +397,7 @@ class AzureStreamingTTS(TTS):
                         
                         # Success - reset failure counter
                         self._failed_requests = 0
-                        print(f"🔵 ✅ Azure complete: {samples_per_channel} samples in ONE frame")
+                        print(f"🔵 ✅ Azure complete: {samples_per_channel} samples, {len(clean_audio)} bytes")
                         
                         yield SynthesizedAudio(
                             frame=frame,
@@ -418,6 +437,49 @@ class AzureStreamingTTS(TTS):
                 request_id=request_id,
                 is_final=True
             )
+    
+    def _clean_combined_audio(self, audio_data: bytes) -> bytes:
+        """Clean combined audio data to remove any artifacts"""
+        try:
+            # Convert to bytearray for easier manipulation
+            audio_array = bytearray(audio_data)
+            
+            # Look for and remove any obvious non-audio patterns at the start
+            # Audio should have good variety - if we see long runs of the same byte, it's probably headers
+            start_idx = 0
+            for i in range(0, min(200, len(audio_array)), 2):  # Check in 16-bit increments
+                # Check the next 20 bytes for variety
+                if i + 20 < len(audio_array):
+                    chunk = audio_array[i:i+20]
+                    unique_bytes = len(set(chunk))
+                    if unique_bytes >= 8:  # Good variety suggests real audio
+                        start_idx = i
+                        break
+            
+            if start_idx > 0:
+                audio_array = audio_array[start_idx:]
+                print(f"🔵 Cleaned audio: removed {start_idx} bytes from start")
+            
+            # Similar check for the end - remove trailing zeros or garbage
+            end_idx = len(audio_array)
+            for i in range(len(audio_array) - 1, max(len(audio_array) - 200, 0), -2):
+                if i >= 20:
+                    chunk = audio_array[i-20:i]
+                    unique_bytes = len(set(chunk))
+                    if unique_bytes >= 8:  # Good variety
+                        end_idx = i
+                        break
+            
+            if end_idx < len(audio_array):
+                removed = len(audio_array) - end_idx
+                audio_array = audio_array[:end_idx]
+                print(f"🔵 Cleaned audio: removed {removed} bytes from end")
+            
+            return bytes(audio_array)
+            
+        except Exception as e:
+            print(f"🔵 Audio cleaning failed: {e}, using original")
+            return audio_data
     
     # Keep the original synthesize method for backward compatibility
     async def synthesize(self, text: str, **kwargs):
