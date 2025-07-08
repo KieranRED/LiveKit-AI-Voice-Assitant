@@ -1,5 +1,5 @@
 """
-LiveKit AI Sales Bot with Azure Speech Services TTS Integration (WORKING VERSION WITH SMOOTH BUFFERING)
+LiveKit AI Sales Bot with Azure Speech Services TTS Integration (FIXED VERSION)
 
 SETUP INSTRUCTIONS:
 1. Install Azure Speech SDK: pip install azure-cognitiveservices-speech
@@ -28,7 +28,6 @@ import tempfile
 import io
 import uuid
 import struct
-import xml.sax.saxutils
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, AsyncGenerator
 
@@ -43,9 +42,10 @@ from livekit.agents.stt import STT, SpeechEvent, SpeechEventType, STTCapabilitie
 from livekit.agents.tts import TTS, TTSCapabilities, SynthesizedAudio
 from livekit.plugins import openai as lk_openai, silero
 
+# Azure Speech Services WebSocket streaming implementation
+
 
 # Azure Streaming TTS Implementation using WebSocket API with OpenAI fallback
-# Based on your working version but with smooth buffering added
 class AzureStreamingTTS(TTS):
     """Azure Speech Services TTS with WebSocket streaming support and OpenAI fallback"""
     
@@ -55,7 +55,7 @@ class AzureStreamingTTS(TTS):
         region: str,
         voice: str = "en-US-AriaNeural",
         speed: float = 1.0,
-        streaming: bool = True  # Enable streaming for smooth buffering
+        streaming: bool = False  # Disable streaming for now, use regular synthesis
     ):
         super().__init__(
             capabilities=TTSCapabilities(streaming=streaming),
@@ -103,6 +103,7 @@ class AzureStreamingTTS(TTS):
                 request_id=request_id,
                 is_final=result.is_final
             )
+            return  # Only take the first result
     
     async def _get_access_token(self) -> str:
         """Get Azure access token"""
@@ -121,14 +122,11 @@ class AzureStreamingTTS(TTS):
         """Create SSML with voice and speed settings"""
         speed_rate = f"{self._speed:.1f}" if self._speed != 1.0 else "1.0"
         
-        # Escape XML characters in text to prevent parsing errors
-        escaped_text = xml.sax.saxutils.escape(text)
-        
         return f"""
         <speak version='1.0' xml:lang='en-US' xmlns='http://www.w3.org/2001/10/synthesis'>
             <voice xml:lang='en-US' name='{self._voice}'>
                 <prosody rate='{speed_rate}'>
-                    {escaped_text}
+                    {text}
                 </prosody>
             </voice>
         </speak>
@@ -167,7 +165,7 @@ class AzureStreamingTTS(TTS):
         return message
     
     def _extract_audio_from_message(self, message: bytes) -> Optional[bytes]:
-        """Extract clean PCM audio data from Azure WebSocket message - WORKING VERSION"""
+        """Extract clean PCM audio data from Azure WebSocket message - AGGRESSIVE CLEANING"""
         try:
             # Check if this is a Path:audio message
             if b'Path:audio' not in message:
@@ -309,177 +307,8 @@ class AzureStreamingTTS(TTS):
             print(f"🔵 Error extracting audio from message: {e}")
             return None
     
-    # NEW: Add streaming support with smooth buffering
-    def stream(self):
-        """LiveKit streaming interface - returns an async context manager"""
-        return self._StreamingContext(self)
-    
-    class _StreamingContext:
-        """Async context manager for LiveKit streaming with smooth buffering"""
-        
-        def __init__(self, tts_instance):
-            self.tts = tts_instance
-            self._current_text = None
-            self._audio_generator = None
-        
-        async def __aenter__(self):
-            """Enter the async context manager"""
-            print("🔵 Azure TTS streaming context entered")
-            return self
-        
-        async def __aexit__(self, exc_type, exc_val, exc_tb):
-            """Exit the async context manager"""
-            print("🔵 Azure TTS streaming context exited")
-            if self._audio_generator:
-                try:
-                    await self._audio_generator.aclose()
-                except Exception as e:
-                    print(f"🔵 Error closing audio generator: {e}")
-        
-        def __aiter__(self):
-            """Make this object async iterable"""
-            return self
-        
-        async def __anext__(self):
-            """Async iterator protocol - wait for text and return audio"""
-            if self._audio_generator is None:
-                # Wait for text to be sent via send()
-                while self._current_text is None:
-                    await asyncio.sleep(0.01)  # Small delay to prevent busy waiting
-                
-                # Start generating audio for the received text
-                text = self._current_text
-                self._current_text = None  # Reset for next iteration
-                
-                print(f"🔵 Azure TTS streaming: '{text[:50]}...'")
-                
-                # Create audio generator for smooth streaming
-                self._audio_generator = self.tts._synthesize_with_smooth_streaming(text)
-            
-            try:
-                # Get next audio chunk
-                audio_chunk = await self._audio_generator.__anext__()
-                return audio_chunk
-            except StopAsyncIteration:
-                # Done with this text, reset for next
-                self._audio_generator = None
-                raise StopAsyncIteration
-            except Exception as e:
-                print(f"❌ Azure TTS stream error: {e}")
-                # Fall back to OpenAI if available
-                if self.tts._openai_fallback:
-                    print("🔄 Using OpenAI fallback in stream...")
-                    try:
-                        request_id = str(uuid.uuid4())
-                        fallback_gen = self.tts._use_fallback(text if 'text' in locals() else "Error occurred", request_id)
-                        audio_chunk = await fallback_gen.__anext__()
-                        return audio_chunk
-                    except Exception as fallback_error:
-                        print(f"❌ Fallback also failed: {fallback_error}")
-                
-                # If all fails, stop iteration
-                raise StopAsyncIteration
-        
-        async def send(self, text: str):
-            """Send text to be synthesized"""
-            print(f"🔵 Received text for synthesis: '{text[:50]}...'")
-            self._current_text = text
-    
-    async def _synthesize_with_smooth_streaming(self, text: str):
-        """NEW: Synthesize with smooth streaming using working extraction + buffering"""
-        request_id = str(uuid.uuid4())
-        
-        # If we've had too many failures, use fallback
-        if self._failed_requests >= self._max_failures:
-            print(f"🔄 Too many Azure failures ({self._failed_requests}), using OpenAI fallback")
-            if self._openai_fallback:
-                async for result in self._use_fallback(text, request_id):
-                    yield result
-                return
-        
-        try:
-            # Get the full audio from your working WebSocket method
-            audio_data = await self._websocket_synthesis(text)
-            
-            if len(audio_data) == 0:
-                print("⚠️ Azure returned no audio, using fallback")
-                if self._openai_fallback:
-                    async for result in self._use_fallback(text, request_id):
-                        yield result
-                    return
-            
-            # SUCCESS! Now stream it smoothly in chunks
-            print(f"🔵 Streaming {len(audio_data)} bytes of audio in smooth chunks")
-            
-            # Use 0.15 second chunks (14400 bytes at 48kHz 16-bit mono) for smooth streaming
-            chunk_size = 14400
-            chunk_count = 0
-            
-            for i in range(0, len(audio_data), chunk_size):
-                chunk_data = audio_data[i:i + chunk_size]
-                
-                # Ensure even length for 16-bit samples
-                if len(chunk_data) % 2 == 1:
-                    chunk_data = chunk_data[:-1]
-                
-                if len(chunk_data) > 0:
-                    samples_per_channel = len(chunk_data) // (self._num_channels * 2)
-                    
-                    audio_frame = rtc.AudioFrame(
-                        data=chunk_data,
-                        sample_rate=self._sample_rate,
-                        num_channels=self._num_channels,
-                        samples_per_channel=samples_per_channel
-                    )
-                    
-                    # Mark as final only for the last chunk
-                    is_final = (i + chunk_size >= len(audio_data))
-                    
-                    yield SynthesizedAudio(
-                        frame=audio_frame,
-                        request_id=request_id,
-                        is_final=is_final
-                    )
-                    
-                    chunk_count += 1
-                    print(f"🔵 Streamed smooth chunk #{chunk_count}: {samples_per_channel} samples")
-                    
-                    # Small delay between chunks to prevent overwhelming the audio pipeline
-                    if not is_final:
-                        await asyncio.sleep(0.05)  # 50ms delay for smooth streaming
-            
-            # Reset failure counter on success
-            self._failed_requests = 0
-            print(f"🔵 ✅ Azure streaming completed: {chunk_count} smooth chunks")
-            
-        except Exception as e:
-            self._failed_requests += 1
-            print(f"❌ Azure TTS Error (failure #{self._failed_requests}): {e}")
-            
-            # Fall back to OpenAI
-            if self._openai_fallback:
-                print("🔄 Using OpenAI fallback due to Azure error...")
-                try:
-                    async for result in self._use_fallback(text, request_id):
-                        yield result
-                    return
-                except Exception as fallback_error:
-                    print(f"❌ Fallback also failed: {fallback_error}")
-            
-            # Final fallback - empty frame
-            empty_frame = rtc.AudioFrame.create(
-                sample_rate=self._sample_rate,
-                num_channels=self._num_channels,
-                samples_per_channel=0
-            )
-            yield SynthesizedAudio(
-                frame=empty_frame,
-                request_id=request_id,
-                is_final=True
-            )
-    
     async def _websocket_synthesis(self, text: str) -> bytes:
-        """Your working WebSocket synthesis method - unchanged"""
+        """Fixed WebSocket synthesis with proper audio extraction"""
         try:
             access_token = await self._get_access_token()
             request_id = str(uuid.uuid4()).replace('-', '')
@@ -533,7 +362,7 @@ class AzureStreamingTTS(TTS):
                             if len(message) < 100:
                                 continue
                             
-                            # Use your working audio extraction method
+                            # FIXED: More robust audio extraction
                             audio_data = self._extract_audio_from_message(message)
                             
                             if audio_data and len(audio_data) >= 100:
@@ -558,6 +387,15 @@ class AzureStreamingTTS(TTS):
                 if len(total_audio) % 2 != 0:
                     total_audio = total_audio[:-1]
                     print(f"🔵 Aligned final audio: removed 1 byte, now {len(total_audio)} bytes")
+                
+                # Additional validation: check for reasonable audio characteristics
+                if len(total_audio) >= 1000:
+                    # Sample first 1000 bytes to check variety (audio should have good variety)
+                    sample = total_audio[:1000]
+                    unique_bytes = len(set(sample))
+                    if unique_bytes < 50:  # Too uniform, might be corrupted
+                        print(f"⚠️ Audio may be corrupted - low byte variety: {unique_bytes}/256")
+                        # Don't throw error here, just warn - some audio might be naturally uniform
                 
                 return total_audio
                 
@@ -658,6 +496,7 @@ class AzureStreamingTTS(TTS):
                 request_id=request_id,
                 is_final=True
             )
+
 
 
 # Check environment variables at startup
@@ -1017,9 +856,9 @@ async def entrypoint(ctx: JobContext):
                 region=azure_region,
                 voice="en-US-AriaNeural",  # Professional female voice
                 speed=1.1,                 # 10% faster speech
-                streaming=True             # Enable streaming for smooth buffering
+                streaming=False            # Disable streaming for now to get basic working
             )
-            print("🚀 Using Azure WebSocket TTS with smooth buffering for speech synthesis!")
+            print("🚀 Using Azure WebSocket TTS for fast speech synthesis!")
         except Exception as e:
             print(f"⚠️ Azure TTS initialization failed, falling back to OpenAI: {e}")
             tts_engine = lk_openai.TTS(voice="alloy", speed=1.1)
@@ -1035,7 +874,7 @@ async def entrypoint(ctx: JobContext):
             llm=lk_openai.LLM(model="gpt-4o-mini"),
             tts=tts_engine,
         )
-        print("🚀 Using Groq STT + Azure Smooth TTS for ultra-fast speech processing!")
+        print("🚀 Using Groq STT + Azure WebSocket TTS for ultra-fast speech processing!")
     else:
         # Full fallback to OpenAI
         session = AgentSession(
@@ -1110,7 +949,7 @@ async def entrypoint(ctx: JobContext):
             print(f"      PIPELINE: {unaccounted:.2f}s ({unaccounted_percent:.1f}%) - System overhead")
         
         # Estimate remaining audio pipeline delay (streaming + buffering)
-        audio_pipeline_delay = 0.5  # Much lower with smooth streaming
+        audio_pipeline_delay = 1.5  # Conservative estimate
         estimated_user_heard = total_measured + audio_pipeline_delay
         print(f"   🎧 ESTIMATED USER HEARS: +{audio_pipeline_delay:.1f}s = {estimated_user_heard:.1f}s total")
         
@@ -1126,7 +965,7 @@ async def entrypoint(ctx: JobContext):
             elif biggest_component == 'STT' and biggest_delay > 1.0:
                 print(f"   💡 SUGGESTION: STT is slow - check Groq API performance or audio quality")
             elif biggest_component == 'TTS' and biggest_delay > 2.0:
-                print(f"   💡 SUGGESTION: TTS is slow - check Azure connection or use faster voice")
+                print(f"   💡 SUGGESTION: TTS is slow - try streaming TTS or faster voice model")
     
     # Event handlers for precise timing measurement
     @session.on("user_state_changed") 
