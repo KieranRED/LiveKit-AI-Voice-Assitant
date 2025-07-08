@@ -322,19 +322,25 @@ class AzureStreamingTTS(TTS):
                                 print(f"🔵 Turn end detected, final buffer size: {len(audio_buffer)}")
                                 # Yield final chunk if any data remains
                                 if len(audio_buffer) > 0:
-                                    samples = len(audio_buffer) // 2
-                                    frame = rtc.AudioFrame(
-                                        data=bytes(audio_buffer),
-                                        sample_rate=self._sample_rate,
-                                        num_channels=self._num_channels,
-                                        samples_per_channel=samples
-                                    )
-                                    yield SynthesizedAudio(
-                                        frame=frame,
-                                        request_id=request_id,
-                                        is_final=True
-                                    )
-                                    print(f"🔵 Yielded final audio chunk: {samples} samples")
+                                    # Ensure final buffer is even length
+                                    if len(audio_buffer) % 2 == 1:
+                                        print(f"🔵 Trimming final odd buffer: {len(audio_buffer)} → {len(audio_buffer) - 1}")
+                                        audio_buffer = audio_buffer[:-1]
+                                    
+                                    if len(audio_buffer) > 0:  # Still have data after trimming
+                                        samples = len(audio_buffer) // 2
+                                        frame = rtc.AudioFrame(
+                                            data=bytes(audio_buffer),
+                                            sample_rate=self._sample_rate,
+                                            num_channels=self._num_channels,
+                                            samples_per_channel=samples
+                                        )
+                                        yield SynthesizedAudio(
+                                            frame=frame,
+                                            request_id=request_id,
+                                            is_final=True
+                                        )
+                                        print(f"🔵 Yielded final audio chunk: {samples} samples")
                                 break
                         
                         elif isinstance(message, bytes):
@@ -342,35 +348,46 @@ class AzureStreamingTTS(TTS):
                             print(f"🔵 Extracted audio data: {len(audio_data) if audio_data else 0} bytes")
                             
                             if audio_data and len(audio_data) >= 100:
+                                # CRITICAL FIX: Ensure audio data length is even (16-bit samples)
+                                if len(audio_data) % 2 == 1:
+                                    print(f"🔵 Trimming odd audio length: {len(audio_data)} → {len(audio_data) - 1}")
+                                    audio_data = audio_data[:-1]  # Remove last byte to make it even
+                                
                                 audio_buffer.extend(audio_data)
                                 print(f"🔵 Audio buffer size: {len(audio_buffer)} bytes")
                                 
                                 # Stream in reasonable chunks for smooth playback
                                 if len(audio_buffer) >= 9600:  # ~0.1 seconds at 48kHz
                                     chunk_size = min(len(audio_buffer), 48000)  # Max 0.5 seconds
+                                    
+                                    # Ensure chunk_size is even (16-bit samples)
+                                    if chunk_size % 2 == 1:
+                                        chunk_size -= 1
+                                    
                                     chunk_data = audio_buffer[:chunk_size]
                                     audio_buffer = audio_buffer[chunk_size:]
                                     
-                                    samples = len(chunk_data) // 2
-                                    frame = rtc.AudioFrame(
-                                        data=bytes(chunk_data),
-                                        sample_rate=self._sample_rate,
-                                        num_channels=self._num_channels,
-                                        samples_per_channel=samples
-                                    )
-                                    
-                                    is_final = False
-                                    yield SynthesizedAudio(
-                                        frame=frame,
-                                        request_id=request_id,
-                                        is_final=is_final
-                                    )
-                                    
-                                    if chunk_count == 0:
-                                        print(f"🔵 First audio chunk streamed after {time.time() - first_chunk_time:.3f}s")
-                                    
-                                    chunk_count += 1
-                                    print(f"🔵 Yielded audio chunk #{chunk_count}: {samples} samples")
+                                    if len(chunk_data) > 0:  # Only yield if we have data
+                                        samples = len(chunk_data) // 2
+                                        frame = rtc.AudioFrame(
+                                            data=bytes(chunk_data),
+                                            sample_rate=self._sample_rate,
+                                            num_channels=self._num_channels,
+                                            samples_per_channel=samples
+                                        )
+                                        
+                                        is_final = False
+                                        yield SynthesizedAudio(
+                                            frame=frame,
+                                            request_id=request_id,
+                                            is_final=is_final
+                                        )
+                                        
+                                        if chunk_count == 0:
+                                            print(f"🔵 First audio chunk streamed after {time.time() - first_chunk_time:.3f}s")
+                                        
+                                        chunk_count += 1
+                                        print(f"🔵 Yielded audio chunk #{chunk_count}: {samples} samples")
                 
                 except asyncio.TimeoutError:
                     print(f"🔵 WebSocket timeout - streamed {chunk_count} chunks")
