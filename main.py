@@ -302,7 +302,7 @@ class AzureStreamingTTS(TTS):
             self._current_text = text
     
     async def _synthesize_streaming(self, text: str, request_id: str):
-        """SINGLE CHUNK: Use only the first audio chunk to eliminate static"""
+        """PROPER COMBINATION: Collect all chunks but combine them correctly"""
         if self._failed_requests >= self._max_failures:
             print(f"🔄 Too many Azure failures ({self._failed_requests}), using OpenAI fallback")
             if self._openai_fallback:
@@ -329,8 +329,8 @@ class AzureStreamingTTS(TTS):
                 await websocket.send(ssml_msg)
                 print(f"🔵 SSML sent, waiting for audio...")
                 
-                # SINGLE CHUNK STRATEGY: Use only the first good audio chunk
-                first_audio_chunk = None
+                # Collect ALL audio chunks but be very careful about combination
+                audio_chunks = []
                 first_audio_time = time.time()
                 
                 try:
@@ -343,57 +343,66 @@ class AzureStreamingTTS(TTS):
                                 break
                         
                         elif isinstance(message, bytes):
-                            # If we don't have our first chunk yet, try to get it
-                            if first_audio_chunk is None:
-                                audio_data = self._extract_audio_from_message(message)
+                            audio_data = self._extract_audio_from_message(message)
+                            
+                            if audio_data and len(audio_data) > 0:
+                                # Ensure each chunk is 16-bit aligned
+                                if len(audio_data) % 2 == 1:
+                                    audio_data = audio_data[:-1]
+                                    print(f"🔵 Aligned chunk: trimmed 1 byte")
                                 
-                                if audio_data and len(audio_data) > 5000:  # Only use substantial chunks
-                                    # Ensure proper alignment
-                                    if len(audio_data) % 2 == 1:
-                                        audio_data = audio_data[:-1]
+                                if len(audio_data) > 0:
+                                    audio_chunks.append(audio_data)
                                     
-                                    first_audio_chunk = audio_data
-                                    latency = time.time() - first_audio_time
-                                    print(f"🔵 ✅ Got first audio chunk: {len(audio_data)} bytes after {latency:.3f}s")
+                                    if len(audio_chunks) == 1:
+                                        latency = time.time() - first_audio_time
+                                        print(f"🔵 First audio after {latency:.3f}s")
                                     
-                                    # We have our audio, we can break and use it
-                                    break
-                                else:
-                                    if audio_data:
-                                        print(f"🔵 Skipping small chunk: {len(audio_data)} bytes")
-                            else:
-                                # We already have our chunk, ignore the rest
-                                print(f"🔵 Ignoring additional message: {len(message)} bytes")
+                                    print(f"🔵 ✅ Collected chunk #{len(audio_chunks)}: {len(audio_data)} bytes")
                 
                 except asyncio.TimeoutError:
                     print(f"🔵 WebSocket timeout")
                 
-                # Use the first chunk only
-                if first_audio_chunk:
-                    print(f"🔵 Using single chunk: {len(first_audio_chunk)} bytes")
+                # CAREFUL COMBINATION: Use a different approach
+                if audio_chunks:
+                    # Calculate total expected size
+                    total_size = sum(len(chunk) for chunk in audio_chunks)
+                    print(f"🔵 Combining {len(audio_chunks)} chunks, total: {total_size} bytes")
                     
-                    # Create audio frame from the single chunk
-                    samples_per_channel = len(first_audio_chunk) // 2
+                    # Try simple concatenation first
+                    combined_audio = b"".join(audio_chunks)
                     
-                    frame = rtc.AudioFrame(
-                        data=first_audio_chunk,
-                        sample_rate=self._sample_rate,
-                        num_channels=self._num_channels,
-                        samples_per_channel=samples_per_channel
-                    )
+                    # Clean up any potential issues at chunk boundaries
+                    clean_audio = self._fix_audio_boundaries(combined_audio)
                     
-                    # Success - reset failure counter
-                    self._failed_requests = 0
-                    print(f"🔵 ✅ Azure complete: {samples_per_channel} samples from SINGLE chunk")
+                    # Final alignment
+                    if len(clean_audio) % 2 == 1:
+                        clean_audio = clean_audio[:-1]
                     
-                    yield SynthesizedAudio(
-                        frame=frame,
-                        request_id=request_id,
-                        is_final=True
-                    )
-                    return
+                    print(f"🔵 Final audio: {len(clean_audio)} bytes")
+                    
+                    if len(clean_audio) >= 2:
+                        samples_per_channel = len(clean_audio) // 2
+                        
+                        frame = rtc.AudioFrame(
+                            data=clean_audio,
+                            sample_rate=self._sample_rate,
+                            num_channels=self._num_channels,
+                            samples_per_channel=samples_per_channel
+                        )
+                        
+                        # Success
+                        self._failed_requests = 0
+                        print(f"🔵 ✅ Azure complete: {samples_per_channel} samples from {len(audio_chunks)} chunks")
+                        
+                        yield SynthesizedAudio(
+                            frame=frame,
+                            request_id=request_id,
+                            is_final=True
+                        )
+                        return
                 
-                # If we get here, no audio was found
+                # No audio found
                 print("🔄 No audio received from Azure, using OpenAI fallback...")
                 if self._openai_fallback:
                     async for result in self._use_fallback(text, request_id):
@@ -413,7 +422,7 @@ class AzureStreamingTTS(TTS):
                 except Exception as fallback_error:
                     print(f"❌ Fallback also failed: {fallback_error}")
             
-            # Final fallback - empty frame
+            # Final fallback
             empty_frame = rtc.AudioFrame.create(
                 sample_rate=self._sample_rate,
                 num_channels=self._num_channels,
@@ -424,6 +433,45 @@ class AzureStreamingTTS(TTS):
                 request_id=request_id,
                 is_final=True
             )
+    
+    def _fix_audio_boundaries(self, audio_data: bytes) -> bytes:
+        """Fix potential issues at chunk boundaries that cause static"""
+        try:
+            # Convert to 16-bit samples for processing
+            import struct
+            
+            # Ensure even length
+            if len(audio_data) % 2 == 1:
+                audio_data = audio_data[:-1]
+            
+            if len(audio_data) < 4:  # Need at least 2 samples
+                return audio_data
+            
+            # Convert to signed 16-bit integers
+            samples = struct.unpack(f'<{len(audio_data)//2}h', audio_data)
+            
+            # Look for potential boundary issues (sudden jumps)
+            cleaned_samples = list(samples)
+            
+            # Simple boundary smoothing - look for unrealistic jumps between samples
+            for i in range(1, len(cleaned_samples)):
+                # If there's a massive jump (>50% of max value), smooth it
+                if abs(cleaned_samples[i] - cleaned_samples[i-1]) > 16000:
+                    # Average with previous sample to reduce the jump
+                    cleaned_samples[i] = (cleaned_samples[i] + cleaned_samples[i-1]) // 2
+                    print(f"🔵 Smoothed boundary at sample {i}")
+            
+            # Convert back to bytes
+            fixed_audio = struct.pack(f'<{len(cleaned_samples)}h', *cleaned_samples)
+            
+            if len(fixed_audio) != len(audio_data):
+                print(f"🔵 Audio length changed during fixing: {len(audio_data)} -> {len(fixed_audio)}")
+            
+            return fixed_audio
+            
+        except Exception as e:
+            print(f"🔵 Audio boundary fixing failed: {e}, using original")
+            return audio_data
     
     def _clean_combined_audio(self, audio_data: bytes) -> bytes:
         """Clean combined audio data to remove any artifacts"""
