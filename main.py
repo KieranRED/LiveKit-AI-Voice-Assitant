@@ -435,38 +435,42 @@ class AzureStreamingTTS(TTS):
             )
     
     def _fix_audio_boundaries(self, audio_data: bytes) -> bytes:
-        """Fix potential issues at chunk boundaries that cause static"""
+        """Fix only REAL boundary issues - be much more conservative"""
         try:
-            # Convert to 16-bit samples for processing
             import struct
             
             # Ensure even length
             if len(audio_data) % 2 == 1:
                 audio_data = audio_data[:-1]
             
-            if len(audio_data) < 4:  # Need at least 2 samples
+            if len(audio_data) < 4:
                 return audio_data
             
             # Convert to signed 16-bit integers
             samples = struct.unpack(f'<{len(audio_data)//2}h', audio_data)
-            
-            # Look for potential boundary issues (sudden jumps)
             cleaned_samples = list(samples)
             
-            # Simple boundary smoothing - look for unrealistic jumps between samples
+            # Only fix EXTREME boundary jumps (near max value)
+            # Normal audio rarely jumps more than 80% of max value between samples
+            extreme_threshold = 26000  # About 80% of max 16-bit value (32767)
+            fixes_made = 0
+            
             for i in range(1, len(cleaned_samples)):
-                # If there's a massive jump (>50% of max value), smooth it
-                if abs(cleaned_samples[i] - cleaned_samples[i-1]) > 16000:
+                jump = abs(cleaned_samples[i] - cleaned_samples[i-1])
+                
+                # Only smooth if it's an EXTREME jump that's clearly a boundary artifact
+                if jump > extreme_threshold:
                     # Average with previous sample to reduce the jump
                     cleaned_samples[i] = (cleaned_samples[i] + cleaned_samples[i-1]) // 2
-                    print(f"🔵 Smoothed boundary at sample {i}")
+                    fixes_made += 1
+            
+            if fixes_made > 0:
+                print(f"🔵 Fixed {fixes_made} extreme audio boundaries")
+            else:
+                print(f"🔵 No boundary fixes needed - audio looks clean")
             
             # Convert back to bytes
             fixed_audio = struct.pack(f'<{len(cleaned_samples)}h', *cleaned_samples)
-            
-            if len(fixed_audio) != len(audio_data):
-                print(f"🔵 Audio length changed during fixing: {len(audio_data)} -> {len(fixed_audio)}")
-            
             return fixed_audio
             
         except Exception as e:
