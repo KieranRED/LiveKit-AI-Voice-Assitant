@@ -175,32 +175,60 @@ class AzureStreamingTTS(TTS):
             return None
     
     # CRITICAL: Implement the stream() method that LiveKit expects
-    async def stream(self) -> AsyncGenerator[None, str]:
+    def stream(self):
         """
-        LiveKit streaming interface - this is what was missing!
-        This method yields control back to LiveKit and receives text to synthesize
+        LiveKit streaming interface - returns an async context manager
         """
-        try:
-            while True:
-                # Wait for text input from LiveKit
-                text = yield
-                if text is None:
-                    break
-                
-                print(f"🔵 Azure TTS streaming: '{text[:50]}...'")
-                
-                # Generate audio and send it back via the synthesize method
-                request_id = str(uuid.uuid4())
-                async for audio_chunk in self._synthesize_streaming(text, request_id):
-                    # Send audio chunk back to LiveKit
-                    yield audio_chunk
+        return self._StreamingContext(self)
+    
+    class _StreamingContext:
+        """Async context manager for LiveKit streaming"""
+        
+        def __init__(self, tts_instance):
+            self.tts = tts_instance
+            self._generator = None
+        
+        async def __aenter__(self):
+            """Enter the async context manager"""
+            self._generator = self._create_stream_generator()
+            await self._generator.asend(None)  # Prime the generator
+            return self
+        
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            """Exit the async context manager"""
+            if self._generator:
+                try:
+                    await self._generator.aclose()
+                except Exception as e:
+                    print(f"🔵 Error closing stream: {e}")
+        
+        async def synthesize(self, text: str):
+            """Send text to the streaming generator and get audio chunks"""
+            if self._generator:
+                try:
+                    print(f"🔵 Azure TTS streaming: '{text[:50]}...'")
                     
-        except Exception as e:
-            print(f"❌ Azure TTS stream error: {e}")
-            # Fall back to OpenAI if available
-            if self._openai_fallback:
-                async for chunk in self._openai_fallback.stream():
-                    yield chunk
+                    # Send text to generator and collect audio chunks
+                    request_id = str(uuid.uuid4())
+                    async for audio_chunk in self.tts._synthesize_streaming(text, request_id):
+                        yield audio_chunk
+                        
+                except Exception as e:
+                    print(f"❌ Azure TTS stream error: {e}")
+                    # Fall back to OpenAI if available
+                    if self.tts._openai_fallback:
+                        print("🔄 Using OpenAI fallback in stream...")
+                        async for chunk in self.tts._openai_fallback.synthesize(text):
+                            yield chunk
+        
+        async def _create_stream_generator(self):
+            """Internal generator for streaming protocol"""
+            try:
+                while True:
+                    # This generator just stays alive for the streaming context
+                    yield
+            except GeneratorExit:
+                print("🔵 Azure TTS stream generator closed")
     
     async def _synthesize_streaming(self, text: str, request_id: str):
         """Internal method to handle Azure WebSocket streaming"""
