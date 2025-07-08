@@ -161,16 +161,34 @@ class AzureStreamingTTS(TTS):
     def _extract_audio_from_message(self, message: bytes) -> Optional[bytes]:
         """Extract clean PCM audio data from Azure WebSocket message"""
         try:
-            if b'Path:audio' not in message:
-                return None
+            # Debug: print first 200 bytes to see message structure
+            print(f"🔵 Message header: {message[:200]}")
             
-            # Find the audio data after the header
-            header_end = message.find(b'\r\n\r\n')
-            if header_end != -1:
-                audio_data = message[header_end + 4:]
-                if len(audio_data) > 0:
-                    return audio_data
+            # Look for different possible audio markers
+            if b'Path:audio' in message:
+                print(f"🔵 Found Path:audio marker")
+                header_end = message.find(b'\r\n\r\n')
+                if header_end != -1:
+                    audio_data = message[header_end + 4:]
+                    print(f"🔵 Audio data after Path:audio: {len(audio_data)} bytes")
+                    return audio_data if len(audio_data) > 0 else None
             
+            # Check if it's just raw audio data (some Azure responses)
+            elif len(message) > 100 and not message.startswith(b'X-RequestId'):
+                print(f"🔵 Treating as raw audio data: {len(message)} bytes")
+                return message
+            
+            # Look for any header pattern and extract everything after it
+            header_patterns = [b'\r\n\r\n', b'\n\n']
+            for pattern in header_patterns:
+                header_end = message.find(pattern)
+                if header_end != -1:
+                    audio_data = message[header_end + len(pattern):]
+                    if len(audio_data) > 100:  # Must be substantial audio data
+                        print(f"🔵 Audio data after header pattern: {len(audio_data)} bytes")
+                        return audio_data
+            
+            print(f"🔵 No audio data found in message")
             return None
             
         except Exception as e:
@@ -359,14 +377,15 @@ class AzureStreamingTTS(TTS):
                 
                 # Success - reset failure counter
                 self._failed_requests = 0
+                print(f"🔵 Azure TTS completed successfully, yielded {chunk_count} chunks")
                 
         except Exception as e:
             self._failed_requests += 1
             print(f"❌ Azure TTS Error (failure #{self._failed_requests}): {e}")
             
-            # Try fallback on error
+            # If Azure fails or produces no audio, fall back to OpenAI immediately
             if self._openai_fallback:
-                print("🔄 Trying OpenAI fallback due to Azure error...")
+                print("🔄 Trying OpenAI fallback due to Azure error or no audio...")
                 try:
                     async for result in self._use_fallback(text, request_id):
                         yield result
@@ -375,6 +394,29 @@ class AzureStreamingTTS(TTS):
                     print(f"❌ Fallback also failed: {fallback_error}")
             
             # If all else fails, yield empty frame
+            empty_frame = rtc.AudioFrame.create(
+                sample_rate=self._sample_rate,
+                num_channels=self._num_channels,
+                samples_per_channel=0
+            )
+            yield SynthesizedAudio(
+                frame=empty_frame,
+                request_id=request_id,
+                is_final=True
+            )
+        
+        # CRITICAL: If we got here but didn't yield any audio, use fallback
+        if chunk_count == 0:
+            print("🔄 Azure completed but no audio chunks yielded, using OpenAI fallback...")
+            if self._openai_fallback:
+                try:
+                    async for result in self._use_fallback(text, request_id):
+                        yield result
+                    return
+                except Exception as fallback_error:
+                    print(f"❌ Fallback also failed: {fallback_error}")
+            
+            # Final fallback - empty frame
             empty_frame = rtc.AudioFrame.create(
                 sample_rate=self._sample_rate,
                 num_channels=self._num_channels,
