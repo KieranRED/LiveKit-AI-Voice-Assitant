@@ -167,22 +167,48 @@ class AzureStreamingTTS(TTS):
         return message
     
     def _extract_audio_from_message(self, message: bytes) -> Optional[bytes]:
-        """Extract clean PCM audio data from Azure WebSocket message - ULTRA SIMPLE VERSION"""
+        """Extract clean PCM audio data from Azure WebSocket message - ROBUST BUT SIMPLE"""
         try:
             # Check if this is a Path:audio message
             if b'Path:audio' not in message:
                 return None
             
-            # SIMPLE: Just look for the most common pattern - headers ending with \r\n\r\n
-            header_end = message.find(b'\r\n\r\n')
-            if header_end == -1:
+            # Find where the headers end - try multiple common patterns
+            header_patterns = [b'\r\n\r\n', b'\n\n', b'\r\r']
+            audio_start = None
+            
+            for pattern in header_patterns:
+                pos = message.find(pattern)
+                if pos != -1:
+                    audio_start = pos + len(pattern)
+                    break
+            
+            # If no header pattern found, try to find where text ends and binary begins
+            if audio_start is None:
+                # Look for the end of readable text
+                for i in range(len(b'Path:audio'), min(len(message), 500)):
+                    # Check if we've hit a run of non-text bytes
+                    if i + 50 < len(message):
+                        chunk = message[i:i+50]
+                        try:
+                            # If we can't decode this as text, it's probably audio
+                            chunk.decode('utf-8')
+                        except UnicodeDecodeError:
+                            # Check if this looks like the start of audio data
+                            if len(set(chunk)) > 10:  # Some variety in bytes
+                                audio_start = i
+                                break
+            
+            if audio_start is None:
+                print(f"🔵 ❌ No header pattern found in {len(message)} byte message")
                 return None
             
-            # Everything after the header should be PCM audio
-            audio_data = message[header_end + 4:]  # Skip the \r\n\r\n
+            # Extract audio data
+            audio_data = message[audio_start:]
             
-            # Basic validation - must be at least 1000 bytes and even length (16-bit samples)
-            if len(audio_data) < 1000:
+            # Basic validation
+            if len(audio_data) < 500:  # Reduced minimum from 1000
+                print(f"🔵 ❌ Audio too small: {len(audio_data)} bytes")
                 return None
                 
             # Ensure even length for 16-bit samples
