@@ -178,10 +178,78 @@ class AzureHybridTTS(TTS):
         
         return ssml
     
-    # CRITICAL: Implement the stream() method that LiveKit expects with pipelining
+    # CRITICAL: Implement the stream() method that LiveKit expects
     def stream(self):
-        """LiveKit streaming interface with audio pipelining - returns an async context manager"""
-        return self._PipelinedStreamingContext(self)
+        """LiveKit streaming interface - returns an async context manager"""
+        if self.capabilities.streaming:
+            return self._PipelinedStreamingContext(self)
+        else:
+            return self._SimpleStreamingContext(self)
+    
+    class _SimpleStreamingContext:
+        """Simple async context manager for LiveKit streaming - no pipelining"""
+        
+        def __init__(self, tts_instance):
+            self.tts = tts_instance
+            self._current_text = None
+            self._audio_generator = None
+        
+        async def __aenter__(self):
+            """Enter the async context manager"""
+            return self
+        
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            """Exit the async context manager"""
+            if self._audio_generator:
+                try:
+                    await self._audio_generator.aclose()
+                except Exception:
+                    pass
+        
+        def __aiter__(self):
+            """Make this object async iterable"""
+            return self
+        
+        async def __anext__(self):
+            """Async iterator protocol - wait for text and return audio"""
+            if self._audio_generator is None:
+                # Wait for text to be sent via send()
+                while self._current_text is None:
+                    await asyncio.sleep(0.01)
+                
+                # Start generating audio for the received text
+                text = self._current_text
+                self._current_text = None
+                
+                # Create audio generator
+                request_id = str(uuid.uuid4())
+                self._audio_generator = self.tts._synthesize_hybrid(text, request_id)
+            
+            try:
+                # Get next audio chunk
+                audio_chunk = await self._audio_generator.__anext__()
+                return audio_chunk
+            except StopAsyncIteration:
+                # Done with this text, reset for next
+                self._audio_generator = None
+                raise StopAsyncIteration
+            except Exception as e:
+                print(f"❌ Azure TTS error: {e}")
+                # Fall back to OpenAI if available
+                if self.tts._openai_fallback:
+                    try:
+                        fallback_gen = self.tts._openai_fallback.synthesize(text if 'text' in locals() else "Error occurred")
+                        audio_chunk = await fallback_gen.__anext__()
+                        return audio_chunk
+                    except Exception:
+                        pass
+                
+                # If all fails, stop iteration
+                raise StopAsyncIteration
+        
+        async def send(self, text: str):
+            """Send text to be synthesized"""
+            self._current_text = text
     
     class _PipelinedStreamingContext:
         """Async context manager for LiveKit streaming with audio pipelining"""
@@ -950,9 +1018,9 @@ async def entrypoint(ctx: JobContext):
                 region=azure_region,
                 voice="en-US-AriaNeural",  # Professional female voice
                 speed=1.1,                 # 10% faster speech
-                streaming=True             # Enable streaming for pipelining
+                streaming=False            # Keep simple for now, enable pipelining later
             )
-            print("🚀 Using Azure Hybrid TTS with Audio Pipelining for seamless speech!")
+            print("🚀 Using Azure Hybrid TTS (REST + WebSocket) for reliable audio!")
         except Exception as e:
             print(f"⚠️ Azure TTS initialization failed, falling back to OpenAI: {e}")
             tts_engine = lk_openai.TTS(voice="alloy", speed=1.1)
