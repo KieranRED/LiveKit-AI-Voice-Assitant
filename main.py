@@ -955,6 +955,8 @@ CONVERSATION GUIDELINES:
 - Be authentic and build trust
 - Focus on value, not just features
 
+IMPORTANT: You may hear quick acknowledgments like "Got it!" or "Absolutely!" before your responses. These are system-generated to reduce response delay. Simply continue with your natural response as if you're having a smooth conversation.
+
 Keep responses conversational (2-3 sentences) unless they ask for detailed information."""
 
     print(f"📝 Prompt length: {len(prompt)} characters")
@@ -1164,6 +1166,10 @@ async def entrypoint(ctx: JobContext):
                 # Mark LLM processing start
                 timing['llm_start'] = asyncio.get_event_loop().time()
                 
+                # 🚀 IMMEDIATE RESPONSE: Send quick acknowledgment to start TTS right away
+                print("⚡ Sending immediate acknowledgment to reduce delay...")
+                asyncio.create_task(send_immediate_acknowledgment())
+                
             elif event.item.role == 'assistant':
                 timing['llm_complete'] = asyncio.get_event_loop().time()
                 print(f"🧠 LLM response ready: {event.item.text_content[:50]}...")
@@ -1171,6 +1177,35 @@ async def entrypoint(ctx: JobContext):
                     llm_time = timing['llm_complete'] - timing['llm_start']
                     print(f"🧠 LLM processing took {llm_time:.3f}s")
                 print(f"📝 Bot message added to chat: {event.item.text_content}")
+    
+    async def send_immediate_acknowledgment():
+        """Send a quick acknowledgment immediately to start TTS and reduce perceived delay"""
+        try:
+            # Wait a tiny bit to ensure STT has fully completed
+            await asyncio.sleep(0.1)
+            
+            # Pick a quick acknowledgment phrase
+            acknowledgments = [
+                "Absolutely!",
+                "Got it!",
+                "That's great!",
+                "Perfect!",
+                "I hear you!",
+                "Interesting!",
+                "Makes sense!"
+            ]
+            
+            import random
+            quick_response = random.choice(acknowledgments)
+            
+            print(f"⚡ Immediate acknowledgment: '{quick_response}'")
+            
+            # Send the quick response immediately to get TTS started
+            await session.say(quick_response, allow_interruptions=True)
+            
+        except Exception as e:
+            print(f"❌ Error sending immediate acknowledgment: {e}")
+            # Don't let this break the main flow
     
     @session.on("speech_created")
     def on_speech_created(event):
