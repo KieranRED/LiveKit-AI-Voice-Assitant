@@ -1,13 +1,12 @@
 """
-LiveKit AI Sales Bot with Azure Speech Services TTS Integration (AZURE SDK VERSION)
+LiveKit AI Sales Bot with Azure Speech Services TTS Integration (HYBRID WEBSOCKET + REST)
 
 SETUP INSTRUCTIONS:
-1. Install Azure Speech SDK: pip install azure-cognitiveservices-speech
-2. Set environment variables:
+1. Set environment variables:
    - AZURE_SPEECH_API_KEY=your_azure_speech_api_key
    - AZURE_SPEECH_REGION=your_region (e.g., eastus, westus2, etc.)
    
-3. Get Azure Speech credentials:
+2. Get Azure Speech credentials:
    - Go to https://portal.azure.com
    - Create "Speech Services" resource
    - Copy API Key and Region from resource page
@@ -35,16 +34,8 @@ from typing import Dict, Any, List, Optional, Tuple, AsyncGenerator
 import openai
 import httpx
 from groq import Groq
-
-# Import Azure Speech SDK
-try:
-    import azure.cognitiveservices.speech as speechsdk
-    AZURE_SDK_AVAILABLE = True
-    print("🔵 Azure Speech SDK available")
-except ImportError:
-    AZURE_SDK_AVAILABLE = False
-    print("⚠️ Azure Speech SDK not available - install with: pip install azure-cognitiveservices-speech")
-
+import websockets
+import aiohttp
 from livekit import agents, rtc
 from livekit.agents import JobContext, WorkerOptions, cli, AgentSession, Agent
 from livekit.agents.stt import STT, SpeechEvent, SpeechEventType, STTCapabilities, SpeechData
@@ -52,9 +43,9 @@ from livekit.agents.tts import TTS, TTSCapabilities, SynthesizedAudio
 from livekit.plugins import openai as lk_openai, silero
 
 
-# Azure TTS using official SDK - should eliminate all audio artifacts
-class AzureSDKTTS(TTS):
-    """Azure Speech Services TTS using official Azure SDK - clean, reliable audio"""
+# Azure TTS using REST API as primary with WebSocket fallback
+class AzureHybridTTS(TTS):
+    """Azure Speech Services TTS using REST API with WebSocket fallback"""
     
     def __init__(
         self,
@@ -70,25 +61,18 @@ class AzureSDKTTS(TTS):
             num_channels=1
         )
         
-        if not AZURE_SDK_AVAILABLE:
-            raise Exception("Azure Speech SDK not available. Install with: pip install azure-cognitiveservices-speech")
-        
         self._api_key = api_key
         self._region = region
         self._voice = voice
         self._speed = speed
         self._failed_requests = 0
         self._max_failures = 3
+        self._use_websocket = False  # Start with REST API
         
-        # Create Azure Speech Config
-        self._speech_config = speechsdk.SpeechConfig(subscription=api_key, region=region)
-        self._speech_config.speech_synthesis_voice_name = voice
-        
-        # Set audio format to match LiveKit expectations
-        # Use 48kHz 16-bit mono PCM to match our sample rate
-        self._speech_config.set_speech_synthesis_output_format(
-            speechsdk.SpeechSynthesisOutputFormat.Raw48Khz16BitMonoPcm
-        )
+        # Azure endpoints
+        self._token_url = f"https://{region}.api.cognitive.microsoft.com/sts/v1.0/issuetoken"
+        self._rest_url = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
+        self._ws_url = f"wss://{region}.tts.speech.microsoft.com/cognitiveservices/websocket/v1"
         
         # Create OpenAI fallback
         self._openai_fallback = None
@@ -98,7 +82,7 @@ class AzureSDKTTS(TTS):
         except Exception as e:
             print(f"⚠️ Failed to initialize OpenAI fallback: {e}")
         
-        print(f"🔵 Azure SDK TTS initialized with voice: {voice}, speed: {speed}")
+        print(f"🔵 Azure Hybrid TTS initialized with voice: {voice}, speed: {speed}")
     
     async def _use_fallback(self, text: str, request_id: str):
         """Use OpenAI TTS as fallback"""
@@ -113,6 +97,19 @@ class AzureSDKTTS(TTS):
                 request_id=request_id,
                 is_final=result.is_final
             )
+    
+    async def _get_access_token(self) -> str:
+        """Get Azure access token"""
+        headers = {
+            'Ocp-Apim-Subscription-Key': self._api_key,
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self._token_url, headers=headers, timeout=10) as response:
+                if response.status != 200:
+                    raise Exception(f"Failed to get Azure token: {response.status}")
+                return await response.text()
     
     def _create_ssml(self, text: str) -> str:
         """Create SSML with voice and speed settings"""
@@ -175,7 +172,7 @@ class AzureSDKTTS(TTS):
                 
                 # Create audio generator
                 request_id = str(uuid.uuid4())
-                self._audio_generator = self.tts._synthesize_sdk(text, request_id)
+                self._audio_generator = self.tts._synthesize_hybrid(text, request_id)
             
             try:
                 # Get next audio chunk
@@ -186,7 +183,7 @@ class AzureSDKTTS(TTS):
                 self._audio_generator = None
                 raise StopAsyncIteration
             except Exception as e:
-                print(f"❌ Azure SDK TTS error: {e}")
+                print(f"❌ Azure TTS error: {e}")
                 # Fall back to OpenAI if available
                 if self.tts._openai_fallback:
                     try:
@@ -203,8 +200,187 @@ class AzureSDKTTS(TTS):
             """Send text to be synthesized"""
             self._current_text = text
     
-    async def _synthesize_sdk(self, text: str, request_id: str):
-        """Clean Azure TTS synthesis using official Azure SDK"""
+    async def _synthesize_rest(self, text: str, request_id: str):
+        """Primary method: Azure REST API synthesis"""
+        try:
+            access_token = await self._get_access_token()
+            ssml = self._create_ssml(text)
+            
+            headers = {
+                'Authorization': f'Bearer {access_token}',
+                'Content-Type': 'application/ssml+xml',
+                'X-Microsoft-OutputFormat': 'raw-48khz-16bit-mono-pcm',
+                'User-Agent': 'LiveKit-Azure-TTS'
+            }
+            
+            print(f"🔵 Azure REST TTS: '{text[:50]}...'")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self._rest_url, 
+                    headers=headers, 
+                    data=ssml.encode('utf-8'),
+                    timeout=30
+                ) as response:
+                    
+                    if response.status == 200:
+                        audio_data = await response.read()
+                        
+                        if len(audio_data) >= 2:
+                            # Ensure proper 16-bit alignment
+                            if len(audio_data) % 2 == 1:
+                                audio_data = audio_data[:-1]
+                            
+                            samples_per_channel = len(audio_data) // 2
+                            
+                            frame = rtc.AudioFrame(
+                                data=audio_data,
+                                sample_rate=self._sample_rate,
+                                num_channels=self._num_channels,
+                                samples_per_channel=samples_per_channel
+                            )
+                            
+                            print(f"🔵 ✅ REST synthesis complete: {samples_per_channel} samples ({len(audio_data)} bytes)")
+                            
+                            yield SynthesizedAudio(
+                                frame=frame,
+                                request_id=request_id,
+                                is_final=True
+                            )
+                            return
+                        else:
+                            print("🔵 ❌ Empty audio response from Azure REST")
+                    else:
+                        print(f"🔵 ❌ Azure REST API error: {response.status}")
+                        error_text = await response.text()
+                        print(f"🔵 Error details: {error_text}")
+                        raise Exception(f"REST API failed with status {response.status}")
+            
+        except Exception as e:
+            print(f"🔵 REST synthesis failed: {e}")
+            raise e
+    
+    async def _synthesize_websocket(self, text: str, request_id: str):
+        """Fallback method: Azure WebSocket synthesis with improved audio extraction"""
+        try:
+            access_token = await self._get_access_token()
+            connection_id = str(uuid.uuid4()).replace('-', '')
+            uri = f"{self._ws_url}?Authorization=Bearer%20{access_token}&X-ConnectionId={connection_id}"
+            
+            print(f"🔵 Azure WebSocket TTS: '{text[:50]}...'")
+            
+            async with websockets.connect(uri) as websocket:
+                # Send config
+                config = {
+                    "context": {
+                        "synthesis": {
+                            "audio": {
+                                "metadataoptions": {
+                                    "sentenceBoundaryEnabled": "false",
+                                    "wordBoundaryEnabled": "false"
+                                },
+                                "outputFormat": "raw-48khz-16bit-mono-pcm"
+                            }
+                        }
+                    }
+                }
+                
+                config_msg = f"X-RequestId:{request_id}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{json.dumps(config)}"
+                await websocket.send(config_msg)
+                
+                # Send SSML
+                ssml = self._create_ssml(text)
+                ssml_msg = f"X-RequestId:{request_id}\r\nContent-Type:application/ssml+xml\r\nPath:ssml\r\n\r\n{ssml}"
+                await websocket.send(ssml_msg)
+                
+                # Collect audio with improved extraction
+                audio_chunks = []
+                
+                try:
+                    while True:
+                        message = await asyncio.wait_for(websocket.recv(), timeout=15.0)
+                        
+                        if isinstance(message, str):
+                            if 'Path:turn.end' in message:
+                                break
+                        elif isinstance(message, bytes):
+                            audio_data = self._extract_audio_carefully(message)
+                            if audio_data and len(audio_data) >= 1000:
+                                audio_chunks.append(audio_data)
+                                print(f"🔵 WebSocket chunk: {len(audio_data)} bytes")
+                
+                except asyncio.TimeoutError:
+                    print(f"🔵 WebSocket timeout")
+                
+                if audio_chunks:
+                    combined_audio = b"".join(audio_chunks)
+                    
+                    if len(combined_audio) % 2 == 1:
+                        combined_audio = combined_audio[:-1]
+                    
+                    if len(combined_audio) >= 2:
+                        samples_per_channel = len(combined_audio) // 2
+                        
+                        frame = rtc.AudioFrame(
+                            data=combined_audio,
+                            sample_rate=self._sample_rate,
+                            num_channels=self._num_channels,
+                            samples_per_channel=samples_per_channel
+                        )
+                        
+                        print(f"🔵 ✅ WebSocket synthesis complete: {samples_per_channel} samples")
+                        
+                        yield SynthesizedAudio(
+                            frame=frame,
+                            request_id=request_id,
+                            is_final=True
+                        )
+                        return
+                
+                raise Exception("No audio received from WebSocket")
+            
+        except Exception as e:
+            print(f"🔵 WebSocket synthesis failed: {e}")
+            raise e
+    
+    def _extract_audio_carefully(self, message: bytes) -> Optional[bytes]:
+        """Carefully extract audio from WebSocket message"""
+        try:
+            if b'Path:audio' not in message:
+                return None
+            
+            # Find the header boundary more carefully
+            boundary_patterns = [b'\r\n\r\n', b'\n\n']
+            audio_start = None
+            
+            for pattern in boundary_patterns:
+                pos = message.find(pattern)
+                if pos != -1:
+                    audio_start = pos + len(pattern)
+                    break
+            
+            if audio_start is None:
+                return None
+            
+            # Extract raw audio
+            raw_audio = message[audio_start:]
+            
+            # Skip if too small
+            if len(raw_audio) < 1000:
+                return None
+            
+            # Ensure alignment
+            if len(raw_audio) % 2 == 1:
+                raw_audio = raw_audio[:-1]
+            
+            return raw_audio
+            
+        except Exception as e:
+            print(f"🔵 Audio extraction error: {e}")
+            return None
+    
+    async def _synthesize_hybrid(self, text: str, request_id: str):
+        """Hybrid synthesis: Try REST first, then WebSocket, then OpenAI"""
         if self._failed_requests >= self._max_failures:
             print(f"🔄 Too many Azure failures ({self._failed_requests}), using OpenAI fallback")
             if self._openai_fallback:
@@ -212,114 +388,56 @@ class AzureSDKTTS(TTS):
                     yield result
                 return
         
-        try:
-            print(f"🔵 Azure SDK TTS synthesis: '{text[:50]}...'")
-            
-            # Create SSML for better voice control
-            ssml = self._create_ssml(text)
-            
-            # Create synthesizer with null audio output (we'll get the raw data)
-            synthesizer = speechsdk.SpeechSynthesizer(
-                speech_config=self._speech_config,
-                audio_config=None  # None means we get raw audio data
-            )
-            
-            # Run synthesis in thread pool to avoid blocking
-            def run_synthesis():
-                try:
-                    # Use SSML for synthesis
-                    result = synthesizer.speak_ssml(ssml)
-                    
-                    if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-                        # Get the raw audio data directly from Azure SDK
-                        audio_data = result.audio_data
-                        print(f"🔵 ✅ Azure SDK synthesis complete: {len(audio_data)} bytes")
-                        return audio_data
-                    elif result.reason == speechsdk.ResultReason.Canceled:
-                        cancellation_details = speechsdk.CancellationDetails(result)
-                        print(f"🔵 ❌ Speech synthesis canceled: {cancellation_details.reason}")
-                        if cancellation_details.reason == speechsdk.CancellationReason.Error:
-                            print(f"🔵 Error details: {cancellation_details.error_details}")
-                        return None
-                    else:
-                        print(f"🔵 ❌ Unexpected synthesis result: {result.reason}")
-                        return None
-                        
-                except Exception as e:
-                    print(f"🔵 ❌ Azure SDK synthesis error: {e}")
-                    return None
-                finally:
-                    # Clean up
-                    if synthesizer:
-                        del synthesizer
-            
-            # Run synthesis asynchronously
-            audio_data = await asyncio.get_event_loop().run_in_executor(None, run_synthesis)
-            
-            if audio_data and len(audio_data) > 0:
-                # Ensure 16-bit alignment
-                if len(audio_data) % 2 == 1:
-                    audio_data = audio_data[:-1]
-                    print(f"🔵 Aligned audio: removed 1 byte for 16-bit alignment")
-                
-                if len(audio_data) >= 2:
-                    samples_per_channel = len(audio_data) // 2
-                    
-                    # Create the audio frame directly from Azure's clean data
-                    frame = rtc.AudioFrame(
-                        data=audio_data,
-                        sample_rate=self._sample_rate,
-                        num_channels=self._num_channels,
-                        samples_per_channel=samples_per_channel
-                    )
-                    
-                    # Success - reset failure counter
+        # Try REST API first (most reliable)
+        if not self._use_websocket:
+            try:
+                async for result in self._synthesize_rest(text, request_id):
+                    # Success with REST
                     self._failed_requests = 0
-                    print(f"🔵 ✅ Clean SDK audio: {samples_per_channel} samples ({len(audio_data)} bytes) - Direct from Azure")
-                    
-                    yield SynthesizedAudio(
-                        frame=frame,
-                        request_id=request_id,
-                        is_final=True
-                    )
+                    yield result
                     return
-            
-            # If we get here, Azure failed - use fallback
-            print("🔄 Azure SDK synthesis failed, using OpenAI fallback...")
-            if self._openai_fallback:
+            except Exception as e:
+                print(f"🔵 REST failed, trying WebSocket: {e}")
+                self._use_websocket = True  # Switch to WebSocket for future requests
+        
+        # Try WebSocket as fallback
+        try:
+            async for result in self._synthesize_websocket(text, request_id):
+                # Success with WebSocket
+                self._failed_requests = 0
+                yield result
+                return
+        except Exception as e:
+            print(f"🔵 WebSocket also failed: {e}")
+            self._failed_requests += 1
+        
+        # Final fallback to OpenAI
+        if self._openai_fallback:
+            print("🔄 Using OpenAI fallback...")
+            try:
                 async for result in self._use_fallback(text, request_id):
                     yield result
-            
-        except Exception as e:
-            self._failed_requests += 1
-            print(f"❌ Azure SDK TTS Error: {e}")
-            
-            # Fall back to OpenAI
-            if self._openai_fallback:
-                try:
-                    async for result in self._use_fallback(text, request_id):
-                        yield result
-                    return
-                except Exception:
-                    pass
-            
-            # Final fallback - empty audio
-            empty_frame = rtc.AudioFrame.create(
-                sample_rate=self._sample_rate,
-                num_channels=self._num_channels,
-                samples_per_channel=0
-            )
-            yield SynthesizedAudio(
-                frame=empty_frame,
-                request_id=request_id,
-                is_final=True
-            )
+                return
+            except Exception:
+                pass
+        
+        # Absolute final fallback
+        empty_frame = rtc.AudioFrame.create(
+            sample_rate=self._sample_rate,
+            num_channels=self._num_channels,
+            samples_per_channel=0
+        )
+        yield SynthesizedAudio(
+            frame=empty_frame,
+            request_id=request_id,
+            is_final=True
+        )
     
     # Keep the original synthesize method for backward compatibility
     async def synthesize(self, text: str, **kwargs):
         """Non-streaming synthesis (fallback)"""
         request_id = str(uuid.uuid4())
-        async for result in self._synthesize_sdk(text, request_id):
+        async for result in self._synthesize_hybrid(text, request_id):
             yield result
 
 
@@ -663,21 +781,21 @@ async def entrypoint(ctx: JobContext):
     
     # Initialize TTS with fallback
     tts_engine = None
-    if azure_api_key and AZURE_SDK_AVAILABLE:
+    if azure_api_key:
         try:
-            tts_engine = AzureSDKTTS(
+            tts_engine = AzureHybridTTS(
                 api_key=azure_api_key,
                 region=azure_region,
                 voice="en-US-AriaNeural",  # Professional female voice
                 speed=1.1,                 # 10% faster speech
                 streaming=False            # Disable streaming for stability
             )
-            print("🚀 Using Azure Official SDK TTS for pristine audio quality!")
+            print("🚀 Using Azure Hybrid TTS (REST + WebSocket) for reliable audio!")
         except Exception as e:
-            print(f"⚠️ Azure SDK TTS initialization failed, falling back to OpenAI: {e}")
+            print(f"⚠️ Azure TTS initialization failed, falling back to OpenAI: {e}")
             tts_engine = lk_openai.TTS(voice="alloy", speed=1.1)
     else:
-        print("⚠️ Azure SDK TTS not available, using OpenAI TTS")
+        print("⚠️ Azure TTS not configured, using OpenAI TTS")
         tts_engine = lk_openai.TTS(voice="alloy", speed=1.1)
     
     # Initialize session with proper components
@@ -688,7 +806,7 @@ async def entrypoint(ctx: JobContext):
             llm=lk_openai.LLM(model="gpt-4o-mini"),
             tts=tts_engine,
         )
-        print("🚀 Using Groq STT + Azure SDK TTS for ultra-fast, pristine audio!")
+        print("🚀 Using Groq STT + Azure Hybrid TTS for ultra-fast, reliable audio!")
     else:
         # Full fallback to OpenAI
         session = AgentSession(
@@ -763,7 +881,7 @@ async def entrypoint(ctx: JobContext):
             print(f"      PIPELINE: {unaccounted:.2f}s ({unaccounted_percent:.1f}%) - System overhead")
         
         # Estimate remaining audio pipeline delay (streaming + buffering)
-        audio_pipeline_delay = 0.1  # Much lower with Azure SDK
+        audio_pipeline_delay = 0.15  # Lower with hybrid approach
         estimated_user_heard = total_measured + audio_pipeline_delay
         print(f"   🎧 ESTIMATED USER HEARS: +{audio_pipeline_delay:.1f}s = {estimated_user_heard:.1f}s total")
         
@@ -779,7 +897,7 @@ async def entrypoint(ctx: JobContext):
             elif biggest_component == 'STT' and biggest_delay > 1.0:
                 print(f"   💡 SUGGESTION: STT is slow - check Groq API performance or audio quality")
             elif biggest_component == 'TTS' and biggest_delay > 1.0:
-                print(f"   💡 SUGGESTION: Azure SDK should provide fastest TTS synthesis!")
+                print(f"   💡 SUGGESTION: Hybrid TTS should provide reliable synthesis!")
     
     # Event handlers for precise timing measurement
     @session.on("user_state_changed") 
