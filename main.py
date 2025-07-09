@@ -1,5 +1,4 @@
 """
-
 LiveKit AI Sales Bot with Azure Speech Services TTS Integration (HYBRID WEBSOCKET + REST)
 
 SETUP INSTRUCTIONS:
@@ -44,9 +43,9 @@ from livekit.agents.tts import TTS, TTSCapabilities, SynthesizedAudio
 from livekit.plugins import openai as lk_openai, silero
 
 
-# Azure TTS using REST API as primary with WebSocket fallback
+# Azure TTS using REST API as primary with WebSocket fallback + Audio Pipelining
 class AzureHybridTTS(TTS):
-    """Azure Speech Services TTS using REST API with WebSocket fallback"""
+    """Azure Speech Services TTS with REST API, WebSocket fallback, and audio pipelining"""
     
     def __init__(
         self,
@@ -54,7 +53,7 @@ class AzureHybridTTS(TTS):
         region: str,
         voice: str = "en-US-AriaNeural",
         speed: float = 1.0,
-        streaming: bool = False
+        streaming: bool = True  # Enable streaming for pipelining
     ):
         super().__init__(
             capabilities=TTSCapabilities(streaming=streaming),
@@ -75,6 +74,12 @@ class AzureHybridTTS(TTS):
         self._rest_url = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
         self._ws_url = f"wss://{region}.tts.speech.microsoft.com/cognitiveservices/websocket/v1"
         
+        # Pipelining state
+        self._synthesis_queue = asyncio.Queue()
+        self._audio_queue = asyncio.Queue()
+        self._synthesis_worker_task = None
+        self._is_streaming = False
+        
         # Create OpenAI fallback
         self._openai_fallback = None
         try:
@@ -83,7 +88,49 @@ class AzureHybridTTS(TTS):
         except Exception as e:
             print(f"⚠️ Failed to initialize OpenAI fallback: {e}")
         
-        print(f"🔵 Azure Hybrid TTS initialized with voice: {voice}, speed: {speed}")
+        print(f"🔵 Azure Hybrid TTS initialized with voice: {voice}, speed: {speed}, pipelining: enabled")
+    
+    async def _start_synthesis_worker(self):
+        """Background worker that continuously processes synthesis requests"""
+        print("🎵 Starting audio synthesis pipeline worker")
+        
+        while self._is_streaming:
+            try:
+                # Wait for next synthesis request
+                synthesis_request = await asyncio.wait_for(
+                    self._synthesis_queue.get(), 
+                    timeout=1.0
+                )
+                
+                if synthesis_request is None:  # Shutdown signal
+                    break
+                
+                text_chunk, request_id, chunk_index = synthesis_request
+                
+                print(f"🎵 Pipeline: Synthesizing chunk #{chunk_index}: '{text_chunk[:30]}...'")
+                
+                # Synthesize this chunk
+                try:
+                    async for audio_result in self._synthesize_hybrid(text_chunk, f"{request_id}-{chunk_index}"):
+                        # Add synthesized audio to the audio queue with chunk info
+                        await self._audio_queue.put((audio_result, chunk_index, False))  # False = not final
+                        break  # We expect one result per chunk
+                        
+                except Exception as e:
+                    print(f"❌ Pipeline synthesis error for chunk #{chunk_index}: {e}")
+                    # Put an error marker in the queue
+                    await self._audio_queue.put((None, chunk_index, False))
+                
+                print(f"✅ Pipeline: Chunk #{chunk_index} synthesis complete")
+                
+            except asyncio.TimeoutError:
+                # No new requests, continue waiting
+                continue
+            except Exception as e:
+                print(f"❌ Synthesis worker error: {e}")
+                await asyncio.sleep(0.1)
+        
+        print("🎵 Synthesis pipeline worker stopped")
     
     async def _use_fallback(self, text: str, request_id: str):
         """Use OpenAI TTS as fallback"""
@@ -131,74 +178,188 @@ class AzureHybridTTS(TTS):
         
         return ssml
     
-    # CRITICAL: Implement the stream() method that LiveKit expects
+    # CRITICAL: Implement the stream() method that LiveKit expects with pipelining
     def stream(self):
-        """LiveKit streaming interface - returns an async context manager"""
-        return self._StreamingContext(self)
+        """LiveKit streaming interface with audio pipelining - returns an async context manager"""
+        return self._PipelinedStreamingContext(self)
     
-    class _StreamingContext:
-        """Async context manager for LiveKit streaming"""
+    class _PipelinedStreamingContext:
+        """Async context manager for LiveKit streaming with audio pipelining"""
         
         def __init__(self, tts_instance):
             self.tts = tts_instance
             self._current_text = None
             self._audio_generator = None
+            self._request_id = None
+            self._chunk_counter = 0
         
         async def __aenter__(self):
-            """Enter the async context manager"""
+            """Enter the async context manager and start pipelining"""
+            self.tts._is_streaming = True
+            
+            # Start the background synthesis worker
+            self.tts._synthesis_worker_task = asyncio.create_task(
+                self.tts._start_synthesis_worker()
+            )
+            
+            print("🎵 Audio pipelining enabled")
             return self
         
         async def __aexit__(self, exc_type, exc_val, exc_tb):
-            """Exit the async context manager"""
-            if self._audio_generator:
+            """Exit the async context manager and cleanup pipelining"""
+            self.tts._is_streaming = False
+            
+            # Signal worker to stop
+            try:
+                await self.tts._synthesis_queue.put(None)  # Shutdown signal
+                
+                if self.tts._synthesis_worker_task:
+                    await asyncio.wait_for(self.tts._synthesis_worker_task, timeout=2.0)
+            except asyncio.TimeoutError:
+                print("⚠️ Synthesis worker didn't stop cleanly")
+                if self.tts._synthesis_worker_task:
+                    self.tts._synthesis_worker_task.cancel()
+            
+            # Clear queues
+            while not self.tts._synthesis_queue.empty():
                 try:
-                    await self._audio_generator.aclose()
-                except Exception:
-                    pass
+                    self.tts._synthesis_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            
+            while not self.tts._audio_queue.empty():
+                try:
+                    self.tts._audio_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            
+            print("🎵 Audio pipelining disabled")
         
         def __aiter__(self):
             """Make this object async iterable"""
             return self
         
         async def __anext__(self):
-            """Async iterator protocol - wait for text and return audio"""
+            """Async iterator protocol - return pipelined audio chunks"""
             if self._audio_generator is None:
                 # Wait for text to be sent via send()
                 while self._current_text is None:
                     await asyncio.sleep(0.01)
                 
-                # Start generating audio for the received text
-                text = self._current_text
+                # Process the text for pipelining
+                full_text = self._current_text
                 self._current_text = None
+                self._request_id = str(uuid.uuid4())
                 
-                # Create audio generator
-                request_id = str(uuid.uuid4())
-                self._audio_generator = self.tts._synthesize_hybrid(text, request_id)
+                # Split text into chunks for pipelining (simple sentence-based splitting)
+                text_chunks = self._split_text_for_pipelining(full_text)
+                
+                print(f"🎵 Pipelining {len(text_chunks)} text chunks")
+                
+                # Queue all chunks for synthesis (they'll be processed in parallel)
+                for i, chunk in enumerate(text_chunks):
+                    await self.tts._synthesis_queue.put((chunk, self._request_id, i))
+                
+                # Create audio generator that yields results as they're ready
+                self._audio_generator = self._get_pipelined_audio(len(text_chunks))
             
             try:
-                # Get next audio chunk
+                # Get next audio chunk from the pipeline
                 audio_chunk = await self._audio_generator.__anext__()
                 return audio_chunk
             except StopAsyncIteration:
                 # Done with this text, reset for next
                 self._audio_generator = None
+                self._chunk_counter = 0
                 raise StopAsyncIteration
             except Exception as e:
-                print(f"❌ Azure TTS error: {e}")
-                # Fall back to OpenAI if available
-                if self.tts._openai_fallback:
-                    try:
-                        fallback_gen = self.tts._openai_fallback.synthesize(text if 'text' in locals() else "Error occurred")
-                        audio_chunk = await fallback_gen.__anext__()
-                        return audio_chunk
-                    except Exception:
-                        pass
-                
-                # If all fails, stop iteration
+                print(f"❌ Pipelined audio error: {e}")
+                # Reset and signal completion
+                self._audio_generator = None
                 raise StopAsyncIteration
         
+        def _split_text_for_pipelining(self, text: str) -> List[str]:
+            """Split text into chunks suitable for pipelining"""
+            # Simple sentence-based splitting
+            import re
+            
+            # Split on sentence boundaries
+            sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+            
+            # Group sentences into chunks (target ~50-100 chars per chunk for good pipelining)
+            chunks = []
+            current_chunk = ""
+            
+            for sentence in sentences:
+                if len(current_chunk) + len(sentence) > 100 and current_chunk:
+                    chunks.append(current_chunk.strip())
+                    current_chunk = sentence
+                else:
+                    if current_chunk:
+                        current_chunk += " " + sentence
+                    else:
+                        current_chunk = sentence
+            
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            
+            # Ensure we have at least one chunk
+            if not chunks:
+                chunks = [text]
+            
+            return chunks
+        
+        async def _get_pipelined_audio(self, expected_chunks: int):
+            """Generator that yields audio chunks as they become available"""
+            chunks_received = 0
+            next_chunk_to_yield = 0
+            chunk_buffer = {}  # Buffer to store out-of-order chunks
+            
+            while chunks_received < expected_chunks:
+                try:
+                    # Wait for next audio chunk
+                    audio_result, chunk_index, is_final = await asyncio.wait_for(
+                        self.tts._audio_queue.get(),
+                        timeout=10.0
+                    )
+                    
+                    chunks_received += 1
+                    
+                    if audio_result is None:
+                        print(f"⚠️ Chunk #{chunk_index} failed synthesis")
+                        continue
+                    
+                    # Store the chunk
+                    chunk_buffer[chunk_index] = audio_result
+                    
+                    # Yield chunks in order
+                    while next_chunk_to_yield in chunk_buffer:
+                        chunk_audio = chunk_buffer.pop(next_chunk_to_yield)
+                        
+                        # Mark as final if this is the last chunk
+                        final_chunk = (next_chunk_to_yield == expected_chunks - 1)
+                        
+                        yield SynthesizedAudio(
+                            frame=chunk_audio.frame,
+                            request_id=chunk_audio.request_id,
+                            is_final=final_chunk
+                        )
+                        
+                        print(f"🎵 ✅ Yielded pipelined chunk #{next_chunk_to_yield}")
+                        next_chunk_to_yield += 1
+                
+                except asyncio.TimeoutError:
+                    print(f"⚠️ Timeout waiting for audio chunk {chunks_received}/{expected_chunks}")
+                    break
+                except Exception as e:
+                    print(f"❌ Error getting pipelined audio: {e}")
+                    break
+            
+            print(f"🎵 Pipelining complete: {chunks_received}/{expected_chunks} chunks processed")
+        
         async def send(self, text: str):
-            """Send text to be synthesized"""
+            """Send text to be synthesized with pipelining"""
+            print(f"🎵 Received text for pipelined synthesis: '{text[:50]}...'")
             self._current_text = text
     
     async def _synthesize_rest(self, text: str, request_id: str):
@@ -789,9 +950,9 @@ async def entrypoint(ctx: JobContext):
                 region=azure_region,
                 voice="en-US-AriaNeural",  # Professional female voice
                 speed=1.1,                 # 10% faster speech
-                streaming=False            # Disable streaming for stability
+                streaming=True             # Enable streaming for pipelining
             )
-            print("🚀 Using Azure Hybrid TTS (REST + WebSocket) for reliable audio!")
+            print("🚀 Using Azure Hybrid TTS with Audio Pipelining for seamless speech!")
         except Exception as e:
             print(f"⚠️ Azure TTS initialization failed, falling back to OpenAI: {e}")
             tts_engine = lk_openai.TTS(voice="alloy", speed=1.1)
