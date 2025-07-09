@@ -1,5 +1,5 @@
 """
-LiveKit AI Sales Bot with Azure Speech Services TTS Integration (FIXED VERSION)
+LiveKit AI Sales Bot with Azure Speech Services TTS Integration (STATIC-FREE VERSION)
 
 SETUP INSTRUCTIONS:
 1. Install Azure Speech SDK: pip install azure-cognitiveservices-speech
@@ -44,9 +44,9 @@ from livekit.agents.tts import TTS, TTSCapabilities, SynthesizedAudio
 from livekit.plugins import openai as lk_openai, silero
 
 
-# Azure Streaming TTS with proper LiveKit streaming support - FIXED VERSION
+# Azure Streaming TTS with STATIC-FREE audio processing
 class AzureStreamingTTS(TTS):
-    """Azure Speech Services TTS with proper LiveKit streaming interface"""
+    """Azure Speech Services TTS with clean audio output - NO STATIC VERSION"""
     
     def __init__(
         self,
@@ -54,7 +54,7 @@ class AzureStreamingTTS(TTS):
         region: str,
         voice: str = "en-US-AriaNeural",
         speed: float = 1.0,
-        streaming: bool = False  # Disable streaming for now
+        streaming: bool = False
     ):
         super().__init__(
             capabilities=TTSCapabilities(streaming=streaming),
@@ -145,8 +145,6 @@ class AzureStreamingTTS(TTS):
             }
         }
         
-        print(f"🔵 Using audio config: {config}")
-        
         message = f"X-RequestId:{request_id}\r\n"
         message += "Content-Type:application/json; charset=utf-8\r\n"
         message += f"Path:speech.config\r\n\r\n"
@@ -156,9 +154,6 @@ class AzureStreamingTTS(TTS):
     
     def _create_ssml_message(self, request_id: str, ssml: str) -> str:
         """Create SSML message for WebSocket"""
-        print(f"🔵 Creating SSML message with text length: {len(ssml)}")
-        print(f"🔵 SSML content: {ssml}")
-        
         message = f"X-RequestId:{request_id}\r\n"
         message += "Content-Type:application/ssml+xml\r\n"
         message += f"Path:ssml\r\n\r\n"
@@ -166,67 +161,146 @@ class AzureStreamingTTS(TTS):
         
         return message
     
-    def _extract_audio_from_message(self, message: bytes) -> Optional[bytes]:
-        """Extract clean PCM audio data from Azure WebSocket message - ROBUST BUT SIMPLE"""
+    def _extract_clean_audio(self, message: bytes) -> Optional[bytes]:
+        """Extract clean PCM audio from Azure message - COMPLETELY REWRITTEN FOR STATIC-FREE OUTPUT"""
         try:
-            # Check if this is a Path:audio message
+            # Must be a Path:audio message
             if b'Path:audio' not in message:
                 return None
             
-            # Find where the headers end - try multiple common patterns
-            header_patterns = [b'\r\n\r\n', b'\n\n', b'\r\r']
-            audio_start = None
+            # Find the double CRLF that separates headers from audio data
+            header_end = message.find(b'\r\n\r\n')
+            if header_end == -1:
+                # Try single newlines as fallback
+                header_end = message.find(b'\n\n')
+                if header_end == -1:
+                    print("🔵 ❌ No header separator found")
+                    return None
+                header_end += 2
+            else:
+                header_end += 4
             
-            for pattern in header_patterns:
-                pos = message.find(pattern)
-                if pos != -1:
-                    audio_start = pos + len(pattern)
-                    break
+            # Extract raw audio data
+            raw_audio = message[header_end:]
             
-            # If no header pattern found, try to find where text ends and binary begins
-            if audio_start is None:
-                # Look for the end of readable text
-                for i in range(len(b'Path:audio'), min(len(message), 500)):
-                    # Check if we've hit a run of non-text bytes
-                    if i + 50 < len(message):
-                        chunk = message[i:i+50]
-                        try:
-                            # If we can't decode this as text, it's probably audio
-                            chunk.decode('utf-8')
-                        except UnicodeDecodeError:
-                            # Check if this looks like the start of audio data
-                            if len(set(chunk)) > 10:  # Some variety in bytes
-                                audio_start = i
-                                break
-            
-            if audio_start is None:
-                print(f"🔵 ❌ No header pattern found in {len(message)} byte message")
+            # Validate minimum size
+            if len(raw_audio) < 1000:
+                print(f"🔵 ❌ Audio chunk too small: {len(raw_audio)} bytes")
                 return None
             
-            # Extract audio data
-            audio_data = message[audio_start:]
+            # Ensure 16-bit alignment
+            if len(raw_audio) % 2 == 1:
+                raw_audio = raw_audio[:-1]
             
-            # Basic validation
-            if len(audio_data) < 500:  # Reduced minimum from 1000
-                print(f"🔵 ❌ Audio too small: {len(audio_data)} bytes")
-                return None
-                
-            # Ensure even length for 16-bit samples
-            if len(audio_data) % 2 == 1:
-                audio_data = audio_data[:-1]
+            # CRITICAL: Remove any potential header remnants at the start
+            # Look for the first section that looks like actual audio PCM data
+            clean_start = 0
+            for i in range(0, min(200, len(raw_audio)), 2):
+                # Convert 10 samples to check if they look like reasonable audio
+                if i + 20 < len(raw_audio):
+                    try:
+                        sample_chunk = raw_audio[i:i+20]
+                        samples = struct.unpack('<10h', sample_chunk)
+                        
+                        # Good audio has variety and reasonable amplitude
+                        unique_values = len(set(samples))
+                        max_amplitude = max(abs(s) for s in samples)
+                        
+                        # If we have good variety and reasonable amplitude, this is likely real audio
+                        if unique_values >= 5 and 100 < max_amplitude < 32000:
+                            clean_start = i
+                            break
+                    except:
+                        continue
             
-            print(f"🔵 ✅ Extracted audio: {len(audio_data)} bytes")
-            return audio_data
+            # Apply the clean start offset
+            if clean_start > 0:
+                raw_audio = raw_audio[clean_start:]
+                print(f"🔵 Cleaned: removed {clean_start} bytes from start")
+            
+            # Similarly, clean the end of any trailing garbage
+            clean_end = len(raw_audio)
+            for i in range(len(raw_audio) - 20, max(len(raw_audio) - 200, 0), -2):
+                if i >= 20:
+                    try:
+                        sample_chunk = raw_audio[i-20:i]
+                        samples = struct.unpack('<10h', sample_chunk)
+                        
+                        unique_values = len(set(samples))
+                        max_amplitude = max(abs(s) for s in samples)
+                        
+                        if unique_values >= 5 and 100 < max_amplitude < 32000:
+                            clean_end = i
+                            break
+                    except:
+                        continue
+            
+            # Apply the clean end
+            if clean_end < len(raw_audio):
+                removed = len(raw_audio) - clean_end
+                raw_audio = raw_audio[:clean_end]
+                print(f"🔵 Cleaned: removed {removed} bytes from end")
+            
+            # Final alignment check
+            if len(raw_audio) % 2 == 1:
+                raw_audio = raw_audio[:-1]
+            
+            print(f"🔵 ✅ Clean audio extracted: {len(raw_audio)} bytes")
+            return raw_audio
             
         except Exception as e:
-            print(f"🔵 ❌ Error extracting audio: {e}")
+            print(f"🔵 ❌ Audio extraction error: {e}")
             return None
+    
+    def _remove_static_artifacts(self, audio_data: bytes) -> bytes:
+        """Remove static and clicking artifacts from audio - GENTLE APPROACH"""
+        try:
+            if len(audio_data) < 4:
+                return audio_data
+            
+            # Convert to samples
+            sample_count = len(audio_data) // 2
+            samples = list(struct.unpack(f'<{sample_count}h', audio_data))
+            
+            # Remove only EXTREME outliers that cause static/clicking
+            # These are typically values very close to the 16-bit limits
+            static_threshold = 30000  # About 92% of max value
+            fixes = 0
+            
+            for i in range(len(samples)):
+                # If a sample is extremely loud (likely static), reduce it
+                if abs(samples[i]) > static_threshold:
+                    # Cap it at a reasonable maximum
+                    if samples[i] > 0:
+                        samples[i] = min(samples[i], static_threshold)
+                    else:
+                        samples[i] = max(samples[i], -static_threshold)
+                    fixes += 1
+            
+            # Smooth out sharp discontinuities that cause clicks
+            # Only fix jumps larger than 15000 (about 45% of range)
+            click_threshold = 15000
+            for i in range(1, len(samples)):
+                jump = abs(samples[i] - samples[i-1])
+                if jump > click_threshold:
+                    # Smooth the transition by averaging
+                    samples[i] = (samples[i] + samples[i-1]) // 2
+                    fixes += 1
+            
+            if fixes > 0:
+                print(f"🔵 Anti-static: fixed {fixes} artifacts")
+            
+            # Convert back to bytes
+            clean_audio = struct.pack(f'<{len(samples)}h', *samples)
+            return clean_audio
+            
+        except Exception as e:
+            print(f"🔵 Anti-static processing failed: {e}")
+            return audio_data
     
     # CRITICAL: Implement the stream() method that LiveKit expects
     def stream(self):
-        """
-        LiveKit streaming interface - returns an async context manager
-        """
+        """LiveKit streaming interface - returns an async context manager"""
         return self._StreamingContext(self)
     
     class _StreamingContext:
@@ -234,23 +308,20 @@ class AzureStreamingTTS(TTS):
         
         def __init__(self, tts_instance):
             self.tts = tts_instance
-            self._generator = None
             self._current_text = None
             self._audio_generator = None
         
         async def __aenter__(self):
             """Enter the async context manager"""
-            print("🔵 Azure TTS stream context entered")
             return self
         
         async def __aexit__(self, exc_type, exc_val, exc_tb):
             """Exit the async context manager"""
-            print("🔵 Azure TTS stream context exited")
             if self._audio_generator:
                 try:
                     await self._audio_generator.aclose()
-                except Exception as e:
-                    print(f"🔵 Error closing audio generator: {e}")
+                except Exception:
+                    pass
         
         def __aiter__(self):
             """Make this object async iterable"""
@@ -261,13 +332,11 @@ class AzureStreamingTTS(TTS):
             if self._audio_generator is None:
                 # Wait for text to be sent via send()
                 while self._current_text is None:
-                    await asyncio.sleep(0.01)  # Small delay to prevent busy waiting
+                    await asyncio.sleep(0.01)
                 
                 # Start generating audio for the received text
                 text = self._current_text
-                self._current_text = None  # Reset for next iteration
-                
-                print(f"🔵 Azure TTS streaming: '{text[:50]}...'")
+                self._current_text = None
                 
                 # Create audio generator
                 request_id = str(uuid.uuid4())
@@ -285,24 +354,22 @@ class AzureStreamingTTS(TTS):
                 print(f"❌ Azure TTS stream error: {e}")
                 # Fall back to OpenAI if available
                 if self.tts._openai_fallback:
-                    print("🔄 Using OpenAI fallback in stream...")
                     try:
                         fallback_gen = self.tts._openai_fallback.synthesize(text if 'text' in locals() else "Error occurred")
                         audio_chunk = await fallback_gen.__anext__()
                         return audio_chunk
-                    except Exception as fallback_error:
-                        print(f"❌ Fallback also failed: {fallback_error}")
+                    except Exception:
+                        pass
                 
                 # If all fails, stop iteration
                 raise StopAsyncIteration
         
         async def send(self, text: str):
             """Send text to be synthesized"""
-            print(f"🔵 Received text for synthesis: '{text[:50]}...'")
             self._current_text = text
     
     async def _synthesize_streaming(self, text: str, request_id: str):
-        """PROPER COMBINATION: Collect all chunks but combine them correctly"""
+        """Clean Azure TTS synthesis with static-free output"""
         if self._failed_requests >= self._max_failures:
             print(f"🔄 Too many Azure failures ({self._failed_requests}), using OpenAI fallback")
             if self._openai_fallback:
@@ -315,11 +382,9 @@ class AzureStreamingTTS(TTS):
             connection_id = str(uuid.uuid4()).replace('-', '')
             uri = f"{self._ws_url}?Authorization=Bearer%20{access_token}&X-ConnectionId={connection_id}"
             
-            print(f"🔵 Starting Azure WebSocket synthesis...")
+            print(f"🔵 Starting Azure synthesis for: '{text[:50]}...'")
             
             async with websockets.connect(uri) as websocket:
-                print(f"🔵 Azure WebSocket connected")
-                
                 # Send config and SSML
                 config_msg = self._create_config_message(request_id)
                 await websocket.send(config_msg)
@@ -327,11 +392,9 @@ class AzureStreamingTTS(TTS):
                 ssml = self._create_ssml(text)
                 ssml_msg = self._create_ssml_message(request_id, ssml)
                 await websocket.send(ssml_msg)
-                print(f"🔵 SSML sent, waiting for audio...")
                 
-                # Collect ALL audio chunks but be very careful about combination
-                audio_chunks = []
-                first_audio_time = time.time()
+                # Collect clean audio chunks
+                clean_chunks = []
                 
                 try:
                     while True:
@@ -339,53 +402,36 @@ class AzureStreamingTTS(TTS):
                         
                         if isinstance(message, str):
                             if 'Path:turn.end' in message:
-                                print(f"🔵 Turn ended")
                                 break
                         
                         elif isinstance(message, bytes):
-                            audio_data = self._extract_audio_from_message(message)
+                            clean_audio = self._extract_clean_audio(message)
                             
-                            if audio_data and len(audio_data) > 0:
-                                # Ensure each chunk is 16-bit aligned
-                                if len(audio_data) % 2 == 1:
-                                    audio_data = audio_data[:-1]
-                                    print(f"🔵 Aligned chunk: trimmed 1 byte")
-                                
-                                if len(audio_data) > 0:
-                                    audio_chunks.append(audio_data)
-                                    
-                                    if len(audio_chunks) == 1:
-                                        latency = time.time() - first_audio_time
-                                        print(f"🔵 First audio after {latency:.3f}s")
-                                    
-                                    print(f"🔵 ✅ Collected chunk #{len(audio_chunks)}: {len(audio_data)} bytes")
+                            if clean_audio and len(clean_audio) >= 1000:
+                                # Apply anti-static processing to each chunk
+                                clean_audio = self._remove_static_artifacts(clean_audio)
+                                clean_chunks.append(clean_audio)
+                                print(f"🔵 ✅ Clean chunk #{len(clean_chunks)}: {len(clean_audio)} bytes")
                 
                 except asyncio.TimeoutError:
                     print(f"🔵 WebSocket timeout")
                 
-                # CAREFUL COMBINATION: Use a different approach
-                if audio_chunks:
-                    # Calculate total expected size
-                    total_size = sum(len(chunk) for chunk in audio_chunks)
-                    print(f"🔵 Combining {len(audio_chunks)} chunks, total: {total_size} bytes")
+                # Combine clean chunks
+                if clean_chunks:
+                    combined_audio = b"".join(clean_chunks)
                     
-                    # Try simple concatenation first
-                    combined_audio = b"".join(audio_chunks)
+                    # Final static removal pass on combined audio
+                    final_audio = self._remove_static_artifacts(combined_audio)
                     
-                    # Clean up any potential issues at chunk boundaries
-                    clean_audio = self._fix_audio_boundaries(combined_audio)
+                    # Ensure proper alignment
+                    if len(final_audio) % 2 == 1:
+                        final_audio = final_audio[:-1]
                     
-                    # Final alignment
-                    if len(clean_audio) % 2 == 1:
-                        clean_audio = clean_audio[:-1]
-                    
-                    print(f"🔵 Final audio: {len(clean_audio)} bytes")
-                    
-                    if len(clean_audio) >= 2:
-                        samples_per_channel = len(clean_audio) // 2
+                    if len(final_audio) >= 2:
+                        samples_per_channel = len(final_audio) // 2
                         
                         frame = rtc.AudioFrame(
-                            data=clean_audio,
+                            data=final_audio,
                             sample_rate=self._sample_rate,
                             num_channels=self._num_channels,
                             samples_per_channel=samples_per_channel
@@ -393,7 +439,7 @@ class AzureStreamingTTS(TTS):
                         
                         # Success
                         self._failed_requests = 0
-                        print(f"🔵 ✅ Azure complete: {samples_per_channel} samples from {len(audio_chunks)} chunks")
+                        print(f"🔵 ✅ Static-free audio: {samples_per_channel} samples")
                         
                         yield SynthesizedAudio(
                             frame=frame,
@@ -402,25 +448,24 @@ class AzureStreamingTTS(TTS):
                         )
                         return
                 
-                # No audio found
-                print("🔄 No audio received from Azure, using OpenAI fallback...")
+                # Fallback if no good audio
+                print("🔄 No clean audio from Azure, using OpenAI...")
                 if self._openai_fallback:
                     async for result in self._use_fallback(text, request_id):
                         yield result
                 
         except Exception as e:
             self._failed_requests += 1
-            print(f"❌ Azure TTS Error (failure #{self._failed_requests}): {e}")
+            print(f"❌ Azure TTS Error: {e}")
             
             # Fall back to OpenAI
             if self._openai_fallback:
-                print("🔄 Using OpenAI fallback due to Azure error...")
                 try:
                     async for result in self._use_fallback(text, request_id):
                         yield result
                     return
-                except Exception as fallback_error:
-                    print(f"❌ Fallback also failed: {fallback_error}")
+                except Exception:
+                    pass
             
             # Final fallback
             empty_frame = rtc.AudioFrame.create(
@@ -433,92 +478,6 @@ class AzureStreamingTTS(TTS):
                 request_id=request_id,
                 is_final=True
             )
-    
-    def _fix_audio_boundaries(self, audio_data: bytes) -> bytes:
-        """Fix only REAL boundary issues - be much more conservative"""
-        try:
-            import struct
-            
-            # Ensure even length
-            if len(audio_data) % 2 == 1:
-                audio_data = audio_data[:-1]
-            
-            if len(audio_data) < 4:
-                return audio_data
-            
-            # Convert to signed 16-bit integers
-            samples = struct.unpack(f'<{len(audio_data)//2}h', audio_data)
-            cleaned_samples = list(samples)
-            
-            # Only fix EXTREME boundary jumps (near max value)
-            # Normal audio rarely jumps more than 80% of max value between samples
-            extreme_threshold = 26000  # About 80% of max 16-bit value (32767)
-            fixes_made = 0
-            
-            for i in range(1, len(cleaned_samples)):
-                jump = abs(cleaned_samples[i] - cleaned_samples[i-1])
-                
-                # Only smooth if it's an EXTREME jump that's clearly a boundary artifact
-                if jump > extreme_threshold:
-                    # Average with previous sample to reduce the jump
-                    cleaned_samples[i] = (cleaned_samples[i] + cleaned_samples[i-1]) // 2
-                    fixes_made += 1
-            
-            if fixes_made > 0:
-                print(f"🔵 Fixed {fixes_made} extreme audio boundaries")
-            else:
-                print(f"🔵 No boundary fixes needed - audio looks clean")
-            
-            # Convert back to bytes
-            fixed_audio = struct.pack(f'<{len(cleaned_samples)}h', *cleaned_samples)
-            return fixed_audio
-            
-        except Exception as e:
-            print(f"🔵 Audio boundary fixing failed: {e}, using original")
-            return audio_data
-    
-    def _clean_combined_audio(self, audio_data: bytes) -> bytes:
-        """Clean combined audio data to remove any artifacts"""
-        try:
-            # Convert to bytearray for easier manipulation
-            audio_array = bytearray(audio_data)
-            
-            # Look for and remove any obvious non-audio patterns at the start
-            # Audio should have good variety - if we see long runs of the same byte, it's probably headers
-            start_idx = 0
-            for i in range(0, min(200, len(audio_array)), 2):  # Check in 16-bit increments
-                # Check the next 20 bytes for variety
-                if i + 20 < len(audio_array):
-                    chunk = audio_array[i:i+20]
-                    unique_bytes = len(set(chunk))
-                    if unique_bytes >= 8:  # Good variety suggests real audio
-                        start_idx = i
-                        break
-            
-            if start_idx > 0:
-                audio_array = audio_array[start_idx:]
-                print(f"🔵 Cleaned audio: removed {start_idx} bytes from start")
-            
-            # Similar check for the end - remove trailing zeros or garbage
-            end_idx = len(audio_array)
-            for i in range(len(audio_array) - 1, max(len(audio_array) - 200, 0), -2):
-                if i >= 20:
-                    chunk = audio_array[i-20:i]
-                    unique_bytes = len(set(chunk))
-                    if unique_bytes >= 8:  # Good variety
-                        end_idx = i
-                        break
-            
-            if end_idx < len(audio_array):
-                removed = len(audio_array) - end_idx
-                audio_array = audio_array[:end_idx]
-                print(f"🔵 Cleaned audio: removed {removed} bytes from end")
-            
-            return bytes(audio_array)
-            
-        except Exception as e:
-            print(f"🔵 Audio cleaning failed: {e}, using original")
-            return audio_data
     
     # Keep the original synthesize method for backward compatibility
     async def synthesize(self, text: str, **kwargs):
@@ -558,12 +517,11 @@ def check_env_vars():
         return True
 
 
-# Custom Groq STT Implementation for LiveKit (FIXED VERSION)
+# Custom Groq STT Implementation for LiveKit
 class GroqSTT(STT):
     """Custom Speech-to-Text implementation using Groq's ultra-fast Distil-Whisper"""
     
     def __init__(self, model: str = "distil-whisper-large-v3-en"):
-        # Proper initialization with capabilities
         super().__init__(
             capabilities=STTCapabilities(streaming=False, interim_results=False)
         )
@@ -576,25 +534,22 @@ class GroqSTT(STT):
         buffer: rtc.AudioFrame, 
         *, 
         language: Optional[str] = None,
-        conn_options=None,  # Add this parameter that LiveKit passes
+        conn_options=None,
     ) -> SpeechEvent:
-        """Convert audio buffer to text using Groq's super-fast API (LiveKit interface)"""
+        """Convert audio buffer to text using Groq's super-fast API"""
         try:
             start_time = time.time()
-            
-            # Default language if not provided
             detected_language = language or "en"
             
             # Convert AudioFrame to WAV format for Groq
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-                # Create WAV file with proper format
                 with wave.open(temp_file.name, 'wb') as wav_file:
                     wav_file.setnchannels(buffer.num_channels)
                     wav_file.setsampwidth(2)  # 16-bit
                     wav_file.setframerate(buffer.sample_rate)
                     wav_file.writeframes(buffer.data.tobytes())
                 
-                # Call Groq API - this is where the magic happens!
+                # Call Groq API
                 with open(temp_file.name, "rb") as audio_file:
                     transcription = await asyncio.to_thread(
                         self._client.audio.transcriptions.create,
@@ -603,7 +558,6 @@ class GroqSTT(STT):
                         response_format="json"
                     )
                 
-                # Clean up temp file
                 os.unlink(temp_file.name)
             
             processing_time = time.time() - start_time
@@ -611,7 +565,6 @@ class GroqSTT(STT):
             
             print(f"⚡ Groq STT: '{text}' (processed in {processing_time:.3f}s)")
             
-            # Return successful transcription
             return SpeechEvent(
                 type=SpeechEventType.FINAL_TRANSCRIPT,
                 alternatives=[SpeechData(text=text, language=detected_language)]
@@ -619,7 +572,6 @@ class GroqSTT(STT):
             
         except Exception as e:
             print(f"❌ Groq STT Error: {e}")
-            # Return empty result on error
             return SpeechEvent(
                 type=SpeechEventType.FINAL_TRANSCRIPT,
                 alternatives=[SpeechData(text="", language=language or "en")]
@@ -669,11 +621,8 @@ async def load_pdf_content(file_path: str = "assets/sales.pdf") -> str:
     print(f"📄 Loading PDF: {file_path}")
     
     try:
-        # Try to read the PDF file
         if os.path.exists(file_path):
             print(f"📄 PDF file found at {file_path}")
-            # For now, return fallback content since we don't have PyPDF2
-            # In production, you'd use: pip install PyPDF2
             print(f"📄 PDF file detected, using fallback content for {file_path}")
             fallback_content = """
             Morgan Digital Agency - Sales Presentation
@@ -887,7 +836,7 @@ async def entrypoint(ctx: JobContext):
                 speed=1.1,                 # 10% faster speech
                 streaming=False            # Disable streaming for stability
             )
-            print("🚀 Using Azure TTS (fixed version) for fast speech synthesis!")
+            print("🚀 Using Static-Free Azure TTS for clean speech synthesis!")
         except Exception as e:
             print(f"⚠️ Azure TTS initialization failed, falling back to OpenAI: {e}")
             tts_engine = lk_openai.TTS(voice="alloy", speed=1.1)
@@ -903,7 +852,7 @@ async def entrypoint(ctx: JobContext):
             llm=lk_openai.LLM(model="gpt-4o-mini"),
             tts=tts_engine,
         )
-        print("🚀 Using Groq STT + Azure Fixed TTS for ultra-fast speech processing!")
+        print("🚀 Using Groq STT + Static-Free Azure TTS for ultra-fast speech processing!")
     else:
         # Full fallback to OpenAI
         session = AgentSession(
@@ -978,7 +927,7 @@ async def entrypoint(ctx: JobContext):
             print(f"      PIPELINE: {unaccounted:.2f}s ({unaccounted_percent:.1f}%) - System overhead")
         
         # Estimate remaining audio pipeline delay (streaming + buffering)
-        audio_pipeline_delay = 0.3  # Much lower with fixed streaming!
+        audio_pipeline_delay = 0.2  # Lower with static-free processing
         estimated_user_heard = total_measured + audio_pipeline_delay
         print(f"   🎧 ESTIMATED USER HEARS: +{audio_pipeline_delay:.1f}s = {estimated_user_heard:.1f}s total")
         
@@ -994,7 +943,7 @@ async def entrypoint(ctx: JobContext):
             elif biggest_component == 'STT' and biggest_delay > 1.0:
                 print(f"   💡 SUGGESTION: STT is slow - check Groq API performance or audio quality")
             elif biggest_component == 'TTS' and biggest_delay > 1.0:
-                print(f"   💡 SUGGESTION: TTS delay should be much lower with fixed streaming!")
+                print(f"   💡 SUGGESTION: TTS delay should be much lower with static-free processing!")
     
     # Event handlers for precise timing measurement
     @session.on("user_state_changed") 
